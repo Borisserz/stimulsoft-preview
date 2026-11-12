@@ -4,7 +4,7 @@
 
   const notes = [];
   if (!status.hasLicense) notes.push("Нет ключа. Положи оба ключа в local/license.key и перезапусти.");
-  else if (status.licenseKind === "dashboards") notes.push("Сборка 9. Подставлен ключ Dashboards.");
+  else if (status.licenseKind === "dashboards") notes.push("Сборка 10. Подставлен ключ Dashboards.");
   else if (status.licenseKind === "reports") notes.push("В файле только ключ Reports. Для дашборда нужен ещё STIMULSOFT_DASHBOARDS_LICENSE_KEY.");
   if (!status.hasReport) notes.push("Нет отчёта. Положи .mrt в local/dashboard.mrt и перезапусти.");
   if (status.versionWarning) notes.push(status.versionWarning);
@@ -48,18 +48,61 @@
   const viewer = designer.jsObject && designer.jsObject.options && designer.jsObject.options.viewer;
   const viewerJs = viewer && viewer.jsObject;
   const viewerProto = viewerJs && Object.getPrototypeOf(viewerJs);
+  function armLiveViewer(js) {
+    const proto = js && Object.getPrototypeOf(js);
+    if (!proto || proto.__liveClick || !proto.InsertHTMLContentToDashboardElement) return;
+    proto.__liveClick = true;
+    const paintHtml = proto.InsertHTMLContentToDashboardElement;
+    proto.InsertHTMLContentToDashboardElement = function (el, html, url, done) {
+      const result = paintHtml.apply(this, arguments);
+      const frame = el && el.frame;
+      if (!frame || !html || url) return result;
+      let filled = false;
+      try {
+        const body = frame.contentDocument && frame.contentDocument.body;
+        filled = !!(body && body.childElementCount > 0);
+      } catch (err) {
+        filled = false;
+      }
+      if (!filled) {
+        frame.onload = function () {
+          try {
+            if (done && frame.contentWindow) done(frame.contentWindow);
+          } catch (err) {
+            console.error(err);
+          }
+        };
+        frame.srcdoc = html;
+      }
+      return result;
+    };
+  }
+
   if (viewerProto && viewerProto.AddDashboardElementToPage && !viewerProto.__paintGuarded) {
     viewerProto.__paintGuarded = true;
+    viewerProto.__liveClick = true;
     const paintHtml = viewerProto.InsertHTMLContentToDashboardElement;
     if (paintHtml) {
       viewerProto.InsertHTMLContentToDashboardElement = function (el, html, url, done) {
         const result = paintHtml.apply(this, arguments);
-        if (el && el.frame && html && !url) {
-          try {
-            el.frame.srcdoc = html;
-          } catch (err) {
-            console.error(err);
-          }
+        const frame = el && el.frame;
+        if (!frame || !html || url) return result;
+        let filled = false;
+        try {
+          const body = frame.contentDocument && frame.contentDocument.body;
+          filled = !!(body && body.childElementCount > 0);
+        } catch (err) {
+          filled = false;
+        }
+        if (!filled) {
+          frame.onload = function () {
+            try {
+              if (done && frame.contentWindow) done(frame.contentWindow);
+            } catch (err) {
+              console.error(err);
+            }
+          };
+          frame.srcdoc = html;
         }
         return result;
       };
@@ -79,7 +122,7 @@
         console.error(name + " не нарисован: " + message);
         const bar = document.getElementById("bar");
         bar.className = "bad";
-        bar.textContent = "Сборка 9. " + name + " не нарисован: " + message;
+        bar.textContent = "Сборка 10. " + name + " не нарисован: " + message;
       }
     };
   }
@@ -168,7 +211,7 @@
     const seen = new Set();
     const lines = [];
     const show = (line) => {
-      line = "Сборка 9. " + line;
+      line = "Сборка 10. " + line;
       if (seen.has(line)) return;
       seen.add(line);
       lines.push(line);
@@ -287,17 +330,10 @@
             const line = "Страница " + (page && page.width) + "×" + (page && page.height)
               + ", блоков " + list.length
               + (picture ? ". " + picture : "");
-            const pictures = list.map((item) => {
+            const stash = list.map((item) => {
               const content = item.contentAttributes || {};
               return {
-                left: item.left,
-                top: item.top,
-                width: item.width,
-                height: item.height,
-                margin: item.margin,
-                backColor: item.backColor,
-                border: item.border,
-                cornerRadius: item.cornerRadius,
+                attrs: item,
                 html: content.htmlContent || "",
                 svg: content.svgContent || "",
               };
@@ -305,79 +341,67 @@
             console.log(line);
             if (bar.className !== "bad") {
               bar.className = list.length ? "" : "bad";
-              bar.textContent = "Сборка 9. " + line;
+              bar.textContent = "Сборка 10. " + line;
             }
-            const drawLayer = (attempt) => {
+            const putContentBack = (item) => {
+              const content = item.attrs.contentAttributes || (item.attrs.contentAttributes = {});
+              if (!content.htmlContent && item.html) content.htmlContent = item.html;
+              if (!content.svgContent && item.svg) content.svgContent = item.svg;
+            };
+            const ensureLiveBlocks = (attempt) => {
+              const js = designer.jsObject && designer.jsObject.options.viewer && designer.jsObject.options.viewer.jsObject;
               const node = [...document.querySelectorAll(".stiJsViewerPage")].find((item) => item.offsetWidth > 0);
-              if (!node) {
-                if (attempt < 8) {
-                  setTimeout(() => drawLayer(attempt + 1), 400);
-                  return;
-                }
-                if (bar.className !== "bad") bar.textContent += ". Страница для рисунка не найдена";
+              if (!js || !node || typeof js.AddDashboardElementToPage !== "function") {
+                if (attempt < 8) setTimeout(() => ensureLiveBlocks(attempt + 1), 400);
+                else if (bar.className !== "bad") bar.textContent += ". Живые блоки не найдены";
                 return;
               }
-              if (node.querySelector(".sti-preview-layer")) return;
-              node.style.position = "relative";
-              node.style.zIndex = "0";
+              armLiveViewer(js);
+              const oldLayer = node.querySelector(".sti-preview-layer");
+              if (oldLayer) oldLayer.remove();
               const panel = node.parentElement;
               if (panel) panel.style.overflow = "auto";
-              const layer = document.createElement("div");
-              layer.className = "sti-preview-layer";
-              layer.style.cssText = "position:absolute;left:0;top:0;width:" + (page.width || node.offsetWidth) + "px;height:" + (page.height || node.offsetHeight) + "px;";
-              let drawn = 0;
-              pictures.forEach((item) => {
-                if (!(item.width > 0) || !(item.height > 0)) return;
-                if (!item.html && !item.svg && !item.backColor && !item.border) return;
-                const margin = typeof item.margin === "string"
-                  ? item.margin.split(",").map((part) => (parseFloat(part) || 0) + "px").join(" ")
-                  : "";
-                const border = item.border && Number(item.border.size) > 0
-                  ? "border-style:solid;border-color:" + (item.border.color || "#c8c8c8") + ";border-width:"
-                    + (item.border.top ? item.border.size : 0) + "px "
-                    + (item.border.right ? item.border.size : 0) + "px "
-                    + (item.border.bottom ? item.border.size : 0) + "px "
-                    + (item.border.left ? item.border.size : 0) + "px;"
-                  : "";
-                const radius = item.cornerRadius
-                  ? "border-radius:"
-                    + (Number(item.cornerRadius.topLeft) || 0) + "px "
-                    + (Number(item.cornerRadius.topRight) || 0) + "px "
-                    + (Number(item.cornerRadius.bottomRight) || 0) + "px "
-                    + (Number(item.cornerRadius.bottomLeft) || 0) + "px;"
-                  : "";
-                const el = document.createElement("div");
-                el.style.cssText = "position:absolute;overflow:hidden;box-sizing:border-box;left:"
-                  + item.left + "px;top:" + item.top + "px;width:" + item.width + "px;height:" + item.height + "px;"
-                  + (margin ? "margin:" + margin + ";" : "")
-                  + (item.backColor ? "background:" + item.backColor + ";" : "")
-                  + border + radius;
-                if (item.html) {
-                  const frame = document.createElement("iframe");
-                  frame.style.cssText = "border:0;width:100%;height:100%;background:#fff";
-                  frame.srcdoc = item.html;
-                  el.appendChild(frame);
-                } else if (item.svg) {
-                  el.innerHTML = item.svg;
-                  const svg = el.querySelector("svg");
-                  if (svg) {
-                    svg.setAttribute("width", "100%");
-                    svg.setAttribute("height", "100%");
-                    svg.style.display = "block";
-                  }
+              const present = new Set(
+                [...node.children].filter((child) => child.elementAttributes).map((child) => child.elementAttributes.name)
+              );
+              stash.forEach((item) => {
+                if (present.has(item.attrs.name)) return;
+                putContentBack(item);
+                if (typeof item.attrs.margin !== "string") item.attrs.margin = "0,0,0,0";
+                if (typeof item.attrs.padding !== "string") item.attrs.padding = "0,0,0,0";
+                try {
+                  js.AddDashboardElementToPage(node, item.attrs);
+                } catch (err) {
+                  console.error(err);
+                  show((item.attrs.name || "блок") + ": " + (err && err.message ? err.message : err));
                 }
-                layer.appendChild(el);
-                drawn++;
               });
               [...node.children].forEach((child) => {
-                if (child.elementAttributes) child.style.display = "none";
+                const attrs = child.elementAttributes;
+                if (!attrs) return;
+                child.style.display = "";
+                const kind = attrs.type;
+                const saved = stash.find((item) => item.attrs.name === attrs.name);
+                const needsFrame = kind === "StiRegionMapElement" || kind === "StiChartElement";
+                if (needsFrame && !child.querySelector("iframe") && saved) {
+                  putContentBack(saved);
+                  try {
+                    js.InsertContentToDashboardElement(child);
+                  } catch (err) {
+                    console.error(err);
+                  }
+                }
               });
-              node.appendChild(layer);
-              const seen = "Нарисовано блоков " + drawn;
+              const live = [...node.children].filter((child) => child.elementAttributes).length;
+              const frames = node.querySelectorAll("iframe").length;
+              const map = stash.find((item) => item.html);
+              const seen = "Живые блоки " + live + ", кадры " + frames
+                + (frames === 0 && map ? ". " + (map.attrs.name || "") + " тип " + (map.attrs.type || "") : "");
               console.log(seen);
-              if (bar.className !== "bad") bar.textContent += ". " + seen;
+              if (bar.className !== "bad") bar.textContent = "Сборка 10. " + line + ". " + seen;
+              if (live < stash.length && attempt < 8) setTimeout(() => ensureLiveBlocks(attempt + 1), 400);
             };
-            setTimeout(() => drawLayer(0), 300);
+            setTimeout(() => ensureLiveBlocks(0), 300);
           } catch (err) {
             show(err && err.message ? err.message : String(err));
           }
