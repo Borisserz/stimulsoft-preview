@@ -24,6 +24,15 @@ STIMULSOFT_DASHBOARDS_LICENSE_KEY=...
 
 Движок 2024.2.6 держит один ключ. Для дашборда подставляется ключ Dashboards.
 
+Подключение к Postgres — как в DBeaver, отдельным файлом. Строка из `.mrt` для запросов не используется, если файл есть.
+
+```cmd
+copy db.env.example local\db.env
+notepad local\db.env
+```
+
+Поля `HOST`, `PORT`, `DATABASE`, `USER`, `PASSWORD`, `SSL`.
+
 Если отчёт уже лежит в другом месте:
 
 ```cmd

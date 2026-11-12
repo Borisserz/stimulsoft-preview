@@ -6,5 +6,6 @@ local/
 license.key
 .env
 .env.*
+db.env
 *.log
 .DS_Store

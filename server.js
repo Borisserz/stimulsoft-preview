@@ -10,6 +10,7 @@ const adapterPort = Number(process.env.ADAPTER_PORT || 9615);
 const pageHost = "127.0.0.1";
 const reportPath = process.env.REPORT_PATH || path.join(localDir, "dashboard.mrt");
 const licensePath = process.env.LICENSE_PATH || path.join(localDir, "license.key");
+const dbEnvPath = path.join(localDir, "db.env");
 
 const scripts = {
   "/scripts/stimulsoft.reports.js": path.join(
@@ -175,6 +176,67 @@ const page = http.createServer((req, res) => {
   send(res, 404, "not found", "text/plain; charset=utf-8");
 });
 
+function parseEnv(text) {
+  const out = {};
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq <= 0) continue;
+    const key = trimmed.slice(0, eq).trim().toLowerCase();
+    let value = trimmed.slice(eq + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+function readDbEnv() {
+  let text = "";
+  try {
+    text = fs.readFileSync(dbEnvPath, "utf8");
+  } catch {
+    return null;
+  }
+  const env = parseEnv(text);
+  let host = env.host || env.server || "";
+  let port = env.port || "5432";
+  let database = env.database || env.db || "";
+  const url = env.url || "";
+  const jdbc = url.match(/postgres(?:ql)?:\/\/([^/:]+)(?::(\d+))?\/([^?]+)/i);
+  if (jdbc) {
+    host = host || jdbc[1];
+    port = env.port || jdbc[2] || port;
+    database = database || decodeURIComponent(jdbc[3]);
+  }
+  const user = env.user || env.username || env.uid || "";
+  const password = env.password || env.pwd || "";
+  const ssl = (env.ssl || env.sslmode || "disable").toLowerCase();
+  if (!host || !database || !user) {
+    return { error: "в local/db.env нужны HOST, DATABASE и USER, как на вкладке Main в DBeaver" };
+  }
+  return { host, port, database, user, password, ssl };
+}
+
+function postgresUrl(db) {
+  const sslmode = db.ssl === "require" || db.ssl === "true" || db.ssl === "1" ? "no-verify" : db.ssl === "prefer" ? "prefer" : "disable";
+  return `postgres://${encodeURIComponent(db.user)}:${encodeURIComponent(db.password)}@${db.host}:${db.port}/${encodeURIComponent(db.database)}?sslmode=${sslmode}`;
+}
+
+function applyDbEnv(command) {
+  if (!command || command.database !== "PostgreSQL") return "";
+  const db = readDbEnv();
+  if (!db) return "нет local/db.env, строка подключения берётся из mrt";
+  if (db.error) return db.error;
+  command.connectionString = postgresUrl(db);
+  return `Postgres ${db.host}:${db.port} / ${db.database} user=${db.user}`;
+}
+
 function adapterLine(command, result) {
   const info = (command && command.connectionStringInfo) || {};
   const where = [
@@ -220,6 +282,8 @@ function acceptAdapter(req, res) {
     }
     try {
       const command = adapter.getCommand(data);
+      const dbNote = applyDbEnv(command);
+      if (dbNote && !dbNote.startsWith("Postgres")) console.log("[db] " + dbNote);
       adapter.process(command, (result) => {
         console.log(adapterLine(command, result));
         res.end(adapter.getResponse(result));
@@ -244,6 +308,10 @@ adapterServer.listen(adapterPort, pageHost, () => {
     console.log(
       `Лицензия  ${licensePath}${info.hasLicense ? "  (" + info.licenseKind + ")" : "  (файла нет, будет триал)"}`
     );
+    const db = readDbEnv();
+    if (!db) console.log(`База      ${dbEnvPath}  (файла нет, Postgres берётся из mrt)`);
+    else if (db.error) console.log(`База      ${db.error}`);
+    else console.log(`База      ${db.host}:${db.port} / ${db.database} user=${db.user}`);
     if (info.versionWarning) console.log(info.versionWarning);
   });
 });
