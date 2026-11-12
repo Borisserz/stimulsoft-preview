@@ -4,7 +4,7 @@
 
   const notes = [];
   if (!status.hasLicense) notes.push("Нет ключа. Положи оба ключа в local/license.key и перезапусти.");
-  else if (status.licenseKind === "dashboards") notes.push("Сборка 6. Подставлен ключ Dashboards.");
+  else if (status.licenseKind === "dashboards") notes.push("Сборка 7. Подставлен ключ Dashboards.");
   else if (status.licenseKind === "reports") notes.push("В файле только ключ Reports. Для дашборда нужен ещё STIMULSOFT_DASHBOARDS_LICENSE_KEY.");
   if (!status.hasReport) notes.push("Нет отчёта. Положи .mrt в local/dashboard.mrt и перезапусти.");
   if (status.versionWarning) notes.push(status.versionWarning);
@@ -50,6 +50,20 @@
   const viewerProto = viewerJs && Object.getPrototypeOf(viewerJs);
   if (viewerProto && viewerProto.AddDashboardElementToPage && !viewerProto.__paintGuarded) {
     viewerProto.__paintGuarded = true;
+    const paintHtml = viewerProto.InsertHTMLContentToDashboardElement;
+    if (paintHtml) {
+      viewerProto.InsertHTMLContentToDashboardElement = function (el, html, url, done) {
+        const result = paintHtml.apply(this, arguments);
+        if (el && el.frame && html && !url) {
+          try {
+            el.frame.srcdoc = html;
+          } catch (err) {
+            console.error(err);
+          }
+        }
+        return result;
+      };
+    }
     const paintElement = viewerProto.AddDashboardElementToPage;
     viewerProto.AddDashboardElementToPage = function (host, attrs) {
       try {
@@ -65,7 +79,7 @@
         console.error(name + " не нарисован: " + message);
         const bar = document.getElementById("bar");
         bar.className = "bad";
-        bar.textContent = "Сборка 6. " + name + " не нарисован: " + message;
+        bar.textContent = "Сборка 7. " + name + " не нарисован: " + message;
       }
     };
   }
@@ -154,7 +168,7 @@
     const seen = new Set();
     const lines = [];
     const show = (line) => {
-      line = "Сборка 6. " + line;
+      line = "Сборка 7. " + line;
       if (seen.has(line)) return;
       seen.add(line);
       lines.push(line);
@@ -257,15 +271,59 @@
             const line = "Страница " + (page && page.width) + "×" + (page && page.height)
               + ", блоков " + list.length
               + (picture ? ". " + picture : "");
+            const pictures = list.map((item) => {
+              const content = item.contentAttributes || {};
+              return {
+                left: item.left,
+                top: item.top,
+                width: item.width,
+                height: item.height,
+                backColor: item.backColor,
+                html: content.htmlContent || "",
+                svg: content.svgContent || "",
+              };
+            });
             console.log(line);
             if (bar.className !== "bad") {
               bar.className = list.length ? "" : "bad";
-              bar.textContent = "Сборка 6. " + line;
+              bar.textContent = "Сборка 7. " + line;
             }
             setTimeout(() => {
-              const nodes = [...document.querySelectorAll(".stiJsViewerPage")].filter((node) => node.offsetWidth > 0);
-              const text = nodes.map((node) => (node.innerText || "").replace(/\s+/g, " ").trim()).join(" ").slice(0, 60);
-              const seen = "На экране страниц " + nodes.length + (text ? ": " + text : ", текста нет");
+              const node = [...document.querySelectorAll(".stiJsViewerPage")].find((item) => item.offsetWidth > 0);
+              const htmls = pictures.filter((item) => item.html);
+              if (node && !node.querySelector("iframe, svg") && pictures.length) {
+                pictures.forEach((item) => {
+                  if (!(item.width > 0) || !(item.height > 0)) return;
+                  const el = document.createElement("div");
+                  el.style.cssText = "position:absolute;overflow:hidden;box-sizing:border-box;left:"
+                    + item.left + "px;top:" + item.top + "px;width:" + item.width + "px;height:" + item.height + "px;"
+                    + (item.backColor ? "background:" + item.backColor + ";" : "");
+                  if (item.html) {
+                    const frame = document.createElement("iframe");
+                    frame.style.cssText = "border:0;width:100%;height:100%";
+                    frame.srcdoc = item.html;
+                    el.appendChild(frame);
+                  } else if (item.svg) {
+                    el.innerHTML = item.svg;
+                  }
+                  node.appendChild(el);
+                });
+              } else if (node) {
+                [...node.querySelectorAll("iframe")].forEach((frame, index) => {
+                  if (frame.getAttribute("srcdoc") || !htmls[index]) return;
+                  let filled = false;
+                  try {
+                    const body = frame.contentDocument && frame.contentDocument.body;
+                    filled = !!(body && body.childElementCount > 1);
+                  } catch (err) {
+                    filled = false;
+                  }
+                  if (!filled) frame.srcdoc = htmls[index].html;
+                });
+              }
+              const frames = node ? node.querySelectorAll("iframe").length : 0;
+              const svgs = node ? node.querySelectorAll("svg").length : 0;
+              const seen = "На экране iframe " + frames + ", svg " + svgs;
               console.log(seen);
               if (bar.className !== "bad") bar.textContent += ". " + seen;
             }, 300);
