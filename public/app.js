@@ -3,16 +3,17 @@
   const status = await fetch("/api/status").then((response) => response.json());
 
   const notes = [];
-  if (status.nodeWarning) notes.push(status.nodeWarning);
-  if (!status.hasLicense) notes.push("Нет local/license.key — это триал, не ваша лицензия 2024.");
+  if (!status.hasLicense) notes.push("Нет ключа. Положи оба ключа в local/license.key и перезапусти.");
+  else if (status.licenseKind === "dashboards") notes.push("Подставлен ключ Dashboards.");
+  else if (status.licenseKind === "reports") notes.push("В файле только ключ Reports. Для дашборда нужен ещё STIMULSOFT_DASHBOARDS_LICENSE_KEY.");
   if (!status.hasReport) notes.push("Нет отчёта. Положи .mrt в local/dashboard.mrt и перезапусти.");
   if (status.versionWarning) notes.push(status.versionWarning);
   if (!notes.length) {
     notes.push("Stimulsoft 2024.2.6. Кнопка просмотра шлёт запросы в адаптер на порту 9615.");
   }
   bar.textContent = notes.join(" ");
-  if (status.versionWarning || status.nodeWarning) bar.className = "bad";
-  else if (!status.hasReport || !status.hasLicense) bar.className = "warn";
+  if (status.versionWarning) bar.className = "bad";
+  else if (!status.hasReport || !status.hasLicense || status.licenseKind === "reports") bar.className = "warn";
 
   if (status.hasLicense) {
     const key = await fetch("/api/license").then((response) => response.text());

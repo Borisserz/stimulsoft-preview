@@ -4,7 +4,7 @@
 
 ## На Windows
 
-Нужен **Node 20**. Node 22 и новее эти пакеты не держат.
+Подойдёт Node, который уже стоит, включая 26.
 
 ```cmd
 git clone https://github.com/Borisserz/stimulsoft-preview.git
@@ -15,7 +15,14 @@ npm install
 Положи рядом с проектом, в папку `local`:
 
 - `local\dashboard.mrt` — файл, который прод ещё открывает на 2024. Не тот, что сохраняли в дизайнере 2026.
-- `local\license.key` — текст лицензии 2024, одной строкой.
+- `local\license.key` — обе строки, как в файле с ключами:
+
+```
+STIMULSOFT_REPORTS_LICENSE_KEY=...
+STIMULSOFT_DASHBOARDS_LICENSE_KEY=...
+```
+
+Движок 2024.2.6 держит один ключ. Для дашборда подставляется ключ Dashboards.
 
 Если отчёт уже лежит в другом месте:
 

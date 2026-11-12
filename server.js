@@ -36,12 +36,37 @@ const scripts = {
 
 fs.mkdirSync(localDir, { recursive: true });
 
-function nodeWarning() {
-  const major = Number(process.versions.node.split(".")[0]);
-  if (major >= 22) {
-    return `Сейчас Node ${process.versions.node}. Для пакетов 2024.2.6 нужен Node 20.`;
+function readLicenseFile() {
+  try {
+    return fs.readFileSync(licensePath, "utf8");
+  } catch {
+    return "";
   }
-  return "";
+}
+
+function parseLicense(text) {
+  const keys = {};
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const match = trimmed.match(/^(STIMULSOFT_[A-Z0-9_]*LICENSE_KEY)\s*=\s*(.+)$/i);
+    if (!match) continue;
+    keys[match[1].toUpperCase()] = match[2].trim().replace(/^["']|["']$/g, "");
+  }
+  if (Object.keys(keys).length) return keys;
+  const raw = text.replace(/^\uFEFF/, "").trim();
+  return raw ? { RAW: raw } : {};
+}
+
+function chosenLicense(keys) {
+  if (keys.STIMULSOFT_DASHBOARDS_LICENSE_KEY) {
+    return { kind: "dashboards", key: keys.STIMULSOFT_DASHBOARDS_LICENSE_KEY };
+  }
+  if (keys.STIMULSOFT_REPORTS_LICENSE_KEY) {
+    return { kind: "reports", key: keys.STIMULSOFT_REPORTS_LICENSE_KEY };
+  }
+  if (keys.RAW) return { kind: "raw", key: keys.RAW };
+  return { kind: "", key: "" };
 }
 
 function readVersion(file) {
@@ -79,13 +104,13 @@ function versionWarning(versions) {
 
 function status() {
   const hasReport = fs.existsSync(reportPath);
-  const hasLicense = fs.existsSync(licensePath);
+  const license = chosenLicense(parseLicense(readLicenseFile()));
   const versions = hasReport ? readVersion(reportPath) : { reportVersion: "", engineVersion: "" };
   return {
     node: process.versions.node,
-    nodeWarning: nodeWarning(),
     hasReport,
-    hasLicense,
+    hasLicense: Boolean(license.key),
+    licenseKind: license.kind,
     reportFile: path.basename(reportPath),
     reportVersion: versions.reportVersion,
     engineVersion: versions.engineVersion,
@@ -120,7 +145,12 @@ const page = http.createServer((req, res) => {
     return;
   }
   if (url.pathname === "/api/license") {
-    serveFile(res, licensePath, "text/plain; charset=utf-8");
+    const license = chosenLicense(parseLicense(readLicenseFile()));
+    if (!license.key) {
+      send(res, 404, "not found", "text/plain; charset=utf-8");
+      return;
+    }
+    send(res, 200, license.key, "text/plain; charset=utf-8");
     return;
   }
   if (url.pathname === "/report.mrt") {
@@ -187,8 +217,9 @@ adapterServer.listen(adapterPort, pageHost, () => {
     console.log(`Адаптер   ${info.adapterUrl}`);
     console.log(`Node      ${info.node}`);
     console.log(`Отчёт     ${reportPath}${info.hasReport ? "" : "  (файла нет)"}`);
-    console.log(`Лицензия  ${licensePath}${info.hasLicense ? "" : "  (файла нет, будет триал)"}`);
-    if (info.nodeWarning) console.log(info.nodeWarning);
+    console.log(
+      `Лицензия  ${licensePath}${info.hasLicense ? "  (" + info.licenseKind + ")" : "  (файла нет, будет триал)"}`
+    );
     if (info.versionWarning) console.log(info.versionWarning);
   });
 });
