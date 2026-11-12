@@ -4,7 +4,7 @@
 
   const notes = [];
   if (!status.hasLicense) notes.push("Нет ключа. Положи оба ключа в local/license.key и перезапусти.");
-  else if (status.licenseKind === "dashboards") notes.push("Подставлен ключ Dashboards.");
+  else if (status.licenseKind === "dashboards") notes.push("Сборка 4. Подставлен ключ Dashboards.");
   else if (status.licenseKind === "reports") notes.push("В файле только ключ Reports. Для дашборда нужен ещё STIMULSOFT_DASHBOARDS_LICENSE_KEY.");
   if (!status.hasReport) notes.push("Нет отчёта. Положи .mrt в local/dashboard.mrt и перезапусти.");
   if (status.versionWarning) notes.push(status.versionWarning);
@@ -122,6 +122,7 @@
     const seen = new Set();
     const lines = [];
     const show = (line) => {
+      line = "Сборка 4. " + line;
       if (seen.has(line)) return;
       seen.add(line);
       lines.push(line);
@@ -129,6 +130,23 @@
       bar.className = "bad";
       bar.textContent = lines.slice(0, 3).join("  ·  ");
     };
+
+    const blankGif = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+    const src = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "src");
+    if (src && src.set && src.get) {
+      Object.defineProperty(HTMLImageElement.prototype, "src", {
+        configurable: true,
+        enumerable: src.enumerable,
+        get: src.get,
+        set(value) {
+          if (value == null || value === "null") {
+            show("Картинка без адреса. Подставлена пустая, страница собирается дальше.");
+            value = blankGif;
+          }
+          return src.set.call(this, value);
+        },
+      });
+    }
 
     const Parser = Stimulsoft.Report.Engine.StiParser.StiParser;
     const parseTextValue2 = Parser.parseTextValue2;
@@ -154,37 +172,94 @@
       return throwError.apply(this, arguments);
     };
 
+    function blockNote(name, message) {
+      const safe = String(message).replace(/[&<>"]/g, (ch) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+      }[ch]));
+      return {
+        name: name,
+        type: "StiTextElement",
+        key: name,
+        left: 8,
+        top: 8,
+        width: 420,
+        height: 48,
+        margin: "0,0,0,0",
+        padding: "4,4,4,4",
+        backColor: "#fff3cd",
+        foreColor: "#3d3208",
+        cornerRadius: "0,0,0,0",
+        contentAttributes: {
+          text: message,
+          svgContent: `<svg xmlns="http://www.w3.org/2000/svg" width="420" height="48"><text x="6" y="28" font-size="14" fill="#3d3208">${safe}</text></svg>`,
+          interaction: {},
+          userViewStates: [],
+        },
+      };
+    }
+
     const Helper = Stimulsoft.Viewer.StiReportHelper;
-    const getElementAttributesAsync = Helper.getElementAttributesAsync;
-    Helper.getElementAttributesAsync = function (page, element, single, request) {
+    const getDashboardPageAsync = Helper.getDashboardPageAsync;
+    Helper.getDashboardPageAsync = function (report, pageIndex, request) {
       if (request) {
         if (!(Number(request.dashboardWidth) > 80)) request.dashboardWidth = 1200;
         if (!(Number(request.dashboardHeight) > 80)) request.dashboardHeight = 760;
       }
-      return Promise.resolve(getElementAttributesAsync.apply(this, arguments)).catch((err) => {
-        const name = element && (element.name || element.alias) ? element.name || element.alias : "блок";
+      console.log("dashboard request", request && request.dashboardWidth, request && request.dashboardHeight);
+      return Promise.resolve(getDashboardPageAsync.apply(this, arguments)).then((page) => {
+        const count = page && page.elements ? page.elements.length : 0;
+        const first = count ? page.elements[0] : null;
+        const line = "Страница " + (page && page.width) + "×" + (page && page.height)
+          + ", блоков " + count
+          + (first ? ". Первый: " + (first.name || first.type) + " " + first.width + "×" + first.height : "");
+        console.log(line);
+        if (bar.className !== "bad") {
+          bar.className = count ? "" : "bad";
+          bar.textContent = "Сборка 4. " + line;
+        }
+        return page;
+      }, (err) => {
+        show(err && err.message ? err.message : String(err));
+        throw err;
+      });
+    };
+
+    const getElementAttributesAsync = Helper.getElementAttributesAsync;
+    Helper.getElementAttributesAsync = function (page, element, single, request) {
+      const name = element && (element.name || element.alias) ? element.name || element.alias : "блок";
+      console.log("блок", name);
+      let pending;
+      try {
+        pending = getElementAttributesAsync.apply(this, arguments);
+      } catch (err) {
         const message = err && err.message ? err.message : String(err);
         show(name + ": " + message);
-        return {
-          name: name,
-          type: "StiTextElement",
-          key: name,
-          left: 8,
-          top: 8,
-          width: 320,
-          height: 48,
-          margin: "0,0,0,0",
-          padding: "4,4,4,4",
-          backColor: "#fff3cd",
-          foreColor: "#3d3208",
-          cornerRadius: "0,0,0,0",
-          contentAttributes: {
-            text: message,
-            interaction: {},
-            userViewStates: [],
-          },
-        };
+        return blockNote(name, name + ": " + message);
+      }
+      let timer;
+      const timeout = new Promise((resolve) => {
+        timer = setTimeout(() => {
+          const message = name + ": не собрался за 12 с";
+          show(message);
+          resolve(blockNote(name, message));
+        }, 12000);
       });
+      const run = Promise.resolve(pending).then(
+        (value) => {
+          clearTimeout(timer);
+          return value;
+        },
+        (err) => {
+          clearTimeout(timer);
+          const message = err && err.message ? err.message : String(err);
+          show(name + ": " + message);
+          return blockNote(name, name + ": " + message);
+        }
+      );
+      return Promise.race([run, timeout]);
     };
 
     window.addEventListener("unhandledrejection", (event) => {

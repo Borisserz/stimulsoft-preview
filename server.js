@@ -128,6 +128,8 @@ function status() {
   };
 }
 
+const EMPTY_GIF = Buffer.from("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7", "base64");
+
 function send(res, code, body, type) {
   res.writeHead(code, {
     "Content-Type": type,
@@ -175,6 +177,11 @@ const page = http.createServer((req, res) => {
   }
   if (url.pathname === "/" || url.pathname === "/index.html") {
     serveFile(res, path.join(root, "public/index.html"), "text/html; charset=utf-8");
+    return;
+  }
+  if (url.pathname === "/null") {
+    console.log("[http] empty image " + req.method + " /null");
+    send(res, 200, EMPTY_GIF, "image/gif");
     return;
   }
   console.log("[http] 404 " + req.method + " " + url.pathname);
