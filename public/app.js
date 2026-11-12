@@ -4,7 +4,7 @@
 
   const notes = [];
   if (!status.hasLicense) notes.push("Нет ключа. Положи оба ключа в local/license.key и перезапусти.");
-  else if (status.licenseKind === "dashboards") notes.push("Сборка 8. Подставлен ключ Dashboards.");
+  else if (status.licenseKind === "dashboards") notes.push("Сборка 9. Подставлен ключ Dashboards.");
   else if (status.licenseKind === "reports") notes.push("В файле только ключ Reports. Для дашборда нужен ещё STIMULSOFT_DASHBOARDS_LICENSE_KEY.");
   if (!status.hasReport) notes.push("Нет отчёта. Положи .mrt в local/dashboard.mrt и перезапусти.");
   if (status.versionWarning) notes.push(status.versionWarning);
@@ -79,7 +79,7 @@
         console.error(name + " не нарисован: " + message);
         const bar = document.getElementById("bar");
         bar.className = "bad";
-        bar.textContent = "Сборка 8. " + name + " не нарисован: " + message;
+        bar.textContent = "Сборка 9. " + name + " не нарисован: " + message;
       }
     };
   }
@@ -168,7 +168,7 @@
     const seen = new Set();
     const lines = [];
     const show = (line) => {
-      line = "Сборка 8. " + line;
+      line = "Сборка 9. " + line;
       if (seen.has(line)) return;
       seen.add(line);
       lines.push(line);
@@ -251,8 +251,24 @@
     const getDashboardPageAsync = Helper.getDashboardPageAsync;
     Helper.getDashboardPageAsync = function (report, pageIndex, request) {
       if (request) {
-        if (!(Number(request.dashboardWidth) > 80)) request.dashboardWidth = 1200;
-        if (!(Number(request.dashboardHeight) > 80)) request.dashboardHeight = 760;
+        let designW = 0;
+        let designH = 0;
+        try {
+          const dashPage = report.pages.getByIndex(pageIndex);
+          designW = Number(dashPage && dashPage.width);
+          designH = Number(dashPage && dashPage.height);
+        } catch (err) {
+          designW = 0;
+          designH = 0;
+        }
+        // StretchXY тянет макет на короткое окно превью и ломает пропорции.
+        if (designW > 80 && designH > 80) {
+          request.dashboardWidth = Math.round(designW);
+          request.dashboardHeight = Math.round(designH);
+        } else {
+          if (!(Number(request.dashboardWidth) > 80)) request.dashboardWidth = 1200;
+          if (!(Number(request.dashboardHeight) > 80)) request.dashboardHeight = 760;
+        }
       }
       console.log("dashboard request", request && request.dashboardWidth, request && request.dashboardHeight);
       const result = getDashboardPageAsync.apply(this, arguments);
@@ -278,7 +294,10 @@
                 top: item.top,
                 width: item.width,
                 height: item.height,
+                margin: item.margin,
                 backColor: item.backColor,
+                border: item.border,
+                cornerRadius: item.cornerRadius,
                 html: content.htmlContent || "",
                 svg: content.svgContent || "",
               };
@@ -286,7 +305,7 @@
             console.log(line);
             if (bar.className !== "bad") {
               bar.className = list.length ? "" : "bad";
-              bar.textContent = "Сборка 8. " + line;
+              bar.textContent = "Сборка 9. " + line;
             }
             const drawLayer = (attempt) => {
               const node = [...document.querySelectorAll(".stiJsViewerPage")].find((item) => item.offsetWidth > 0);
@@ -299,27 +318,59 @@
                 return;
               }
               if (node.querySelector(".sti-preview-layer")) return;
-              if (getComputedStyle(node).position === "static") node.style.position = "relative";
+              node.style.position = "relative";
+              node.style.zIndex = "0";
+              const panel = node.parentElement;
+              if (panel) panel.style.overflow = "auto";
               const layer = document.createElement("div");
               layer.className = "sti-preview-layer";
-              layer.style.cssText = "position:absolute;left:0;top:0;width:" + (page.width || node.offsetWidth) + "px;height:" + (page.height || node.offsetHeight) + "px;z-index:5;";
+              layer.style.cssText = "position:absolute;left:0;top:0;width:" + (page.width || node.offsetWidth) + "px;height:" + (page.height || node.offsetHeight) + "px;";
               let drawn = 0;
               pictures.forEach((item) => {
-                if (!(item.width > 0) || !(item.height > 0) || (!item.html && !item.svg)) return;
+                if (!(item.width > 0) || !(item.height > 0)) return;
+                if (!item.html && !item.svg && !item.backColor && !item.border) return;
+                const margin = typeof item.margin === "string"
+                  ? item.margin.split(",").map((part) => (parseFloat(part) || 0) + "px").join(" ")
+                  : "";
+                const border = item.border && Number(item.border.size) > 0
+                  ? "border-style:solid;border-color:" + (item.border.color || "#c8c8c8") + ";border-width:"
+                    + (item.border.top ? item.border.size : 0) + "px "
+                    + (item.border.right ? item.border.size : 0) + "px "
+                    + (item.border.bottom ? item.border.size : 0) + "px "
+                    + (item.border.left ? item.border.size : 0) + "px;"
+                  : "";
+                const radius = item.cornerRadius
+                  ? "border-radius:"
+                    + (Number(item.cornerRadius.topLeft) || 0) + "px "
+                    + (Number(item.cornerRadius.topRight) || 0) + "px "
+                    + (Number(item.cornerRadius.bottomRight) || 0) + "px "
+                    + (Number(item.cornerRadius.bottomLeft) || 0) + "px;"
+                  : "";
                 const el = document.createElement("div");
                 el.style.cssText = "position:absolute;overflow:hidden;box-sizing:border-box;left:"
                   + item.left + "px;top:" + item.top + "px;width:" + item.width + "px;height:" + item.height + "px;"
-                  + (item.backColor ? "background:" + item.backColor + ";" : "");
+                  + (margin ? "margin:" + margin + ";" : "")
+                  + (item.backColor ? "background:" + item.backColor + ";" : "")
+                  + border + radius;
                 if (item.html) {
                   const frame = document.createElement("iframe");
                   frame.style.cssText = "border:0;width:100%;height:100%;background:#fff";
                   frame.srcdoc = item.html;
                   el.appendChild(frame);
-                } else {
+                } else if (item.svg) {
                   el.innerHTML = item.svg;
+                  const svg = el.querySelector("svg");
+                  if (svg) {
+                    svg.setAttribute("width", "100%");
+                    svg.setAttribute("height", "100%");
+                    svg.style.display = "block";
+                  }
                 }
                 layer.appendChild(el);
                 drawn++;
+              });
+              [...node.children].forEach((child) => {
+                if (child.elementAttributes) child.style.display = "none";
               });
               node.appendChild(layer);
               const seen = "Нарисовано блоков " + drawn;
