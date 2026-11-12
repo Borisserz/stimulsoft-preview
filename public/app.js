@@ -4,7 +4,7 @@
 
   const notes = [];
   if (!status.hasLicense) notes.push("Нет ключа. Положи оба ключа в local/license.key и перезапусти.");
-  else if (status.licenseKind === "dashboards") notes.push("Сборка 5. Подставлен ключ Dashboards.");
+  else if (status.licenseKind === "dashboards") notes.push("Сборка 6. Подставлен ключ Dashboards.");
   else if (status.licenseKind === "reports") notes.push("В файле только ключ Reports. Для дашборда нужен ещё STIMULSOFT_DASHBOARDS_LICENSE_KEY.");
   if (!status.hasReport) notes.push("Нет отчёта. Положи .mrt в local/dashboard.mrt и перезапусти.");
   if (status.versionWarning) notes.push(status.versionWarning);
@@ -45,6 +45,30 @@
   }
   designer.report = report;
   designer.renderHtml("designer");
+  const viewer = designer.jsObject && designer.jsObject.options && designer.jsObject.options.viewer;
+  const viewerJs = viewer && viewer.jsObject;
+  const viewerProto = viewerJs && Object.getPrototypeOf(viewerJs);
+  if (viewerProto && viewerProto.AddDashboardElementToPage && !viewerProto.__paintGuarded) {
+    viewerProto.__paintGuarded = true;
+    const paintElement = viewerProto.AddDashboardElementToPage;
+    viewerProto.AddDashboardElementToPage = function (host, attrs) {
+      try {
+        if (attrs) {
+          if (typeof attrs.margin !== "string") attrs.margin = "0,0,0,0";
+          if (typeof attrs.padding !== "string") attrs.padding = "0,0,0,0";
+          if (!attrs.contentAttributes) attrs.contentAttributes = { interaction: {}, userViewStates: [] };
+        }
+        return paintElement.apply(this, arguments);
+      } catch (err) {
+        const name = attrs && (attrs.name || attrs.type) ? attrs.name || attrs.type : "блок";
+        const message = err && err.message ? err.message : String(err);
+        console.error(name + " не нарисован: " + message);
+        const bar = document.getElementById("bar");
+        bar.className = "bad";
+        bar.textContent = "Сборка 6. " + name + " не нарисован: " + message;
+      }
+    };
+  }
   function matchingBrace(text, open) {
     let depth = 0;
     let quote = false;
@@ -130,7 +154,7 @@
     const seen = new Set();
     const lines = [];
     const show = (line) => {
-      line = "Сборка 5. " + line;
+      line = "Сборка 6. " + line;
       if (seen.has(line)) return;
       seen.add(line);
       lines.push(line);
@@ -222,17 +246,29 @@
         result.try((page) => {
           try {
             const list = page && page.elements ? page.elements : [];
-            const sample = list.slice(0, 3).map((item) => {
-              return (item.name || item.type) + " " + item.left + "," + item.top + " " + item.width + "×" + item.height;
-            }).join("; ");
+            const first = list[0];
+            const content = first && first.contentAttributes ? first.contentAttributes : {};
+            const picture = first
+              ? (first.name || first.type)
+                + (content.htmlContent ? " html " + content.htmlContent.length : "")
+                + (content.svgContent ? " svg " + content.svgContent.length : "")
+                + (!content.htmlContent && !content.svgContent ? " без картинки" : "")
+              : "";
             const line = "Страница " + (page && page.width) + "×" + (page && page.height)
               + ", блоков " + list.length
-              + (sample ? ". " + sample : "");
+              + (picture ? ". " + picture : "");
             console.log(line);
             if (bar.className !== "bad") {
               bar.className = list.length ? "" : "bad";
-              bar.textContent = "Сборка 5. " + line;
+              bar.textContent = "Сборка 6. " + line;
             }
+            setTimeout(() => {
+              const nodes = [...document.querySelectorAll(".stiJsViewerPage")].filter((node) => node.offsetWidth > 0);
+              const text = nodes.map((node) => (node.innerText || "").replace(/\s+/g, " ").trim()).join(" ").slice(0, 60);
+              const seen = "На экране страниц " + nodes.length + (text ? ": " + text : ", текста нет");
+              console.log(seen);
+              if (bar.className !== "bad") bar.textContent += ". " + seen;
+            }, 300);
           } catch (err) {
             show(err && err.message ? err.message : String(err));
           }
