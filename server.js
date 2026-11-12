@@ -175,6 +175,28 @@ const page = http.createServer((req, res) => {
   send(res, 404, "not found", "text/plain; charset=utf-8");
 });
 
+function adapterLine(command, result) {
+  const info = (command && command.connectionStringInfo) || {};
+  const where = [
+    info.host || "без host",
+    info.port ? ":" + info.port : "",
+    info.database ? " / " + info.database : "",
+    info.user ? " user=" + info.user : "",
+  ].join("");
+  let detail = "fail";
+  if (result && result.success) detail = "ok";
+  else if (result && result.notice) {
+    detail = String(result.notice).split(/\r?\n/).map((line) => line.trim()).find(Boolean) || "fail";
+  } else if (result) {
+    const copy = { ...result };
+    delete copy.rows;
+    delete copy.columns;
+    detail = JSON.stringify(copy);
+  }
+  if (detail.length > 300) detail = detail.slice(0, 300);
+  return `[adapter] ${command.command || "?"} ${command.database || ""} ${where} ${detail}`;
+}
+
 function acceptAdapter(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
@@ -199,8 +221,7 @@ function acceptAdapter(req, res) {
     try {
       const command = adapter.getCommand(data);
       adapter.process(command, (result) => {
-        const notice = result && result.success ? "ok" : (result && result.notice) || "fail";
-        console.log(`[adapter] ${command.command || "?"} ${command.database || ""} ${notice}`);
+        console.log(adapterLine(command, result));
         res.end(adapter.getResponse(result));
       });
     } catch (err) {
