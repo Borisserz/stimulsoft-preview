@@ -154,6 +154,45 @@
       return throwError.apply(this, arguments);
     };
 
+    const Helper = Stimulsoft.Viewer.StiReportHelper;
+    const getElementAttributesAsync = Helper.getElementAttributesAsync;
+    Helper.getElementAttributesAsync = function (page, element, single, request) {
+      if (request) {
+        if (!(Number(request.dashboardWidth) > 80)) request.dashboardWidth = 1200;
+        if (!(Number(request.dashboardHeight) > 80)) request.dashboardHeight = 760;
+      }
+      return Promise.resolve(getElementAttributesAsync.apply(this, arguments)).catch((err) => {
+        const name = element && (element.name || element.alias) ? element.name || element.alias : "блок";
+        const message = err && err.message ? err.message : String(err);
+        show(name + ": " + message);
+        return {
+          name: name,
+          type: "StiTextElement",
+          key: name,
+          left: 8,
+          top: 8,
+          width: 320,
+          height: 48,
+          margin: "0,0,0,0",
+          padding: "4,4,4,4",
+          backColor: "#fff3cd",
+          foreColor: "#3d3208",
+          cornerRadius: "0,0,0,0",
+          contentAttributes: {
+            text: message,
+            interaction: {},
+            userViewStates: [],
+          },
+        };
+      });
+    };
+
+    window.addEventListener("unhandledrejection", (event) => {
+      const reason = event.reason;
+      const message = reason && reason.message ? reason.message : String(reason);
+      show(message);
+    });
+
     const showError = Stimulsoft.System.StiError.showError;
     Stimulsoft.System.StiError.showError = function (error) {
       const message = error && error.message ? String(error.message) : String(error || "");

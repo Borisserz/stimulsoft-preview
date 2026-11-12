@@ -21,6 +21,10 @@ const scripts = {
     root,
     "node_modules/stimulsoft-reports-js/Scripts/stimulsoft.reports.maps.js"
   ),
+  "/scripts/stimulsoft.reports.chart.js": path.join(
+    root,
+    "node_modules/stimulsoft-reports-js/Scripts/stimulsoft.reports.chart.js"
+  ),
   "/scripts/stimulsoft.dashboards.js": path.join(
     root,
     "node_modules/stimulsoft-dashboards-js/Scripts/stimulsoft.dashboards.js"
