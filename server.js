@@ -49,9 +49,12 @@ function parseLicense(text) {
   for (const line of text.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
-    const match = trimmed.match(/^(STIMULSOFT_[A-Z0-9_]*LICENSE_KEY)\s*=\s*(.+)$/i);
+    const match = trimmed.match(/^(?:STIMULSOFT_)?([A-Z0-9_]*LICENSE_KEY)\s*=\s*(.+)$/i);
     if (!match) continue;
-    keys[match[1].toUpperCase()] = match[2].trim().replace(/^["']|["']$/g, "");
+    const name = match[1].toUpperCase().startsWith("STIMULSOFT_")
+      ? match[1].toUpperCase()
+      : "STIMULSOFT_" + match[1].toUpperCase();
+    keys[name] = match[2].trim().replace(/^["']|["']$/g, "");
   }
   if (Object.keys(keys).length) return keys;
   const raw = text.replace(/^\uFEFF/, "").trim();
