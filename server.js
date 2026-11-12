@@ -173,6 +173,7 @@ const page = http.createServer((req, res) => {
     serveFile(res, path.join(root, "public/index.html"), "text/html; charset=utf-8");
     return;
   }
+  console.log("[http] 404 " + req.method + " " + url.pathname);
   send(res, 404, "not found", "text/plain; charset=utf-8");
 });
 
@@ -276,6 +277,7 @@ function acceptAdapter(req, res) {
   req.on("end", () => {
     const data = Buffer.concat(chunks).toString("utf8");
     if (!data) {
+      console.log("[adapter] 404 " + req.method + " " + (req.url || "/"));
       res.writeHead(404);
       res.end();
       return;

@@ -22,6 +22,7 @@
 
   Stimulsoft.StiOptions.WebServer.url = status.adapterUrl;
   Stimulsoft.StiOptions.WebServer.checkDataAdaptersVersion = true;
+  rememberParserErrors();
 
   let report;
   if (status.hasReport) {
@@ -36,6 +37,38 @@
   const designer = new Stimulsoft.Designer.StiDesigner(options, "StiDesigner", false);
   designer.report = report;
   designer.renderHtml("designer");
+  function rememberParserErrors() {
+    const seen = new Set();
+    const lines = [];
+    const show = (line) => {
+      if (seen.has(line)) return;
+      seen.add(line);
+      lines.push(line);
+      console.error(line);
+      bar.className = "bad";
+      bar.textContent = lines.slice(0, 3).join("  ·  ");
+    };
+
+    const Check = Stimulsoft.Report.Engine.StiParser.StiParser_Check;
+    const throwError = Check.prototype.throwError;
+    Check.prototype.throwError = function (code, token) {
+      const expr = String(this.inputExpression || "");
+      const bad = token && token.value != null ? String(token.value) : "";
+      const at = token && typeof token.position === "number" ? token.position : -1;
+      const slice = at >= 0 ? expr.slice(Math.max(0, at - 60), at + 60) : expr.slice(0, 180);
+      const component = this.component;
+      const name = component && (component.name || component.alias) ? component.name || component.alias : "";
+      show("Формула не разобралась" + (name ? " в " + name : "") + ". Место: " + (bad || "?") + ". Текст: " + slice);
+      return throwError.apply(this, arguments);
+    };
+
+    const showError = Stimulsoft.System.StiError.showError;
+    Stimulsoft.System.StiError.showError = function (error) {
+      const message = error && error.message ? String(error.message) : String(error || "");
+      if (message && message.indexOf("Parser error") !== 0) show(message);
+      return showError.apply(this, arguments);
+    };
+  }
 })().catch((err) => {
   const bar = document.getElementById("bar");
   bar.className = "bad";
