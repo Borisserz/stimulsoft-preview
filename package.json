@@ -1,0 +1,18 @@
+{
+  "name": "stimulsoft-preview",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Stimulsoft 2024.2.6 dashboard designer and data adapter. The real .mrt stays on the work machine.",
+  "engines": {
+    "node": ">=18 <22"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "stimulsoft-dashboards-js": "2024.2.6",
+    "stimulsoft-data-adapter": "2024.2.6",
+    "stimulsoft-reports-js": "2024.2.6",
+    "xmldoc": "1.3.0"
+  }
+}

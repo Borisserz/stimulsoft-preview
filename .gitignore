@@ -1,0 +1,10 @@
+node_modules/
+local/
+*.mrt
+*.mrz
+*.mdc
+license.key
+.env
+.env.*
+*.log
+.DS_Store
