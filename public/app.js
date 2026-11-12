@@ -4,7 +4,7 @@
 
   const notes = [];
   if (!status.hasLicense) notes.push("Нет ключа. Положи оба ключа в local/license.key и перезапусти.");
-  else if (status.licenseKind === "dashboards") notes.push("Сборка 4. Подставлен ключ Dashboards.");
+  else if (status.licenseKind === "dashboards") notes.push("Сборка 5. Подставлен ключ Dashboards.");
   else if (status.licenseKind === "reports") notes.push("В файле только ключ Reports. Для дашборда нужен ещё STIMULSOFT_DASHBOARDS_LICENSE_KEY.");
   if (!status.hasReport) notes.push("Нет отчёта. Положи .mrt в local/dashboard.mrt и перезапусти.");
   if (status.versionWarning) notes.push(status.versionWarning);
@@ -35,6 +35,14 @@
 
   const options = new Stimulsoft.Designer.StiDesignerOptions();
   const designer = new Stimulsoft.Designer.StiDesigner(options, "StiDesigner", false);
+  const designerProto = designer.jsObject && Object.getPrototypeOf(designer.jsObject);
+  if (designerProto && designerProto.GetCustomFontsCssText) {
+    const fontCss = designerProto.GetCustomFontsCssText;
+    designerProto.GetCustomFontsCssText = function (url, family) {
+      if (url == null || url === "null" || url === "") return "";
+      return fontCss.apply(this, arguments);
+    };
+  }
   designer.report = report;
   designer.renderHtml("designer");
   function matchingBrace(text, open) {
@@ -122,7 +130,7 @@
     const seen = new Set();
     const lines = [];
     const show = (line) => {
-      line = "Сборка 4. " + line;
+      line = "Сборка 5. " + line;
       if (seen.has(line)) return;
       seen.add(line);
       lines.push(line);
@@ -209,22 +217,30 @@
         if (!(Number(request.dashboardHeight) > 80)) request.dashboardHeight = 760;
       }
       console.log("dashboard request", request && request.dashboardWidth, request && request.dashboardHeight);
-      return Promise.resolve(getDashboardPageAsync.apply(this, arguments)).then((page) => {
-        const count = page && page.elements ? page.elements.length : 0;
-        const first = count ? page.elements[0] : null;
-        const line = "Страница " + (page && page.width) + "×" + (page && page.height)
-          + ", блоков " + count
-          + (first ? ". Первый: " + (first.name || first.type) + " " + first.width + "×" + first.height : "");
-        console.log(line);
-        if (bar.className !== "bad") {
-          bar.className = count ? "" : "bad";
-          bar.textContent = "Сборка 4. " + line;
-        }
-        return page;
-      }, (err) => {
-        show(err && err.message ? err.message : String(err));
-        throw err;
-      });
+      const result = getDashboardPageAsync.apply(this, arguments);
+      if (result && typeof result.try === "function") {
+        result.try((page) => {
+          try {
+            const list = page && page.elements ? page.elements : [];
+            const sample = list.slice(0, 3).map((item) => {
+              return (item.name || item.type) + " " + item.left + "," + item.top + " " + item.width + "×" + item.height;
+            }).join("; ");
+            const line = "Страница " + (page && page.width) + "×" + (page && page.height)
+              + ", блоков " + list.length
+              + (sample ? ". " + sample : "");
+            console.log(line);
+            if (bar.className !== "bad") {
+              bar.className = list.length ? "" : "bad";
+              bar.textContent = "Сборка 5. " + line;
+            }
+          } catch (err) {
+            show(err && err.message ? err.message : String(err));
+          }
+        });
+        return result;
+      }
+      show("Страница вернулась без ожидания результата.");
+      return result;
     };
 
     const getElementAttributesAsync = Helper.getElementAttributesAsync;
@@ -242,10 +258,10 @@
       let timer;
       const timeout = new Promise((resolve) => {
         timer = setTimeout(() => {
-          const message = name + ": не собрался за 12 с";
+          const message = name + ": не собрался за 25 с";
           show(message);
           resolve(blockNote(name, message));
-        }, 12000);
+        }, 25000);
       });
       const run = Promise.resolve(pending).then(
         (value) => {
