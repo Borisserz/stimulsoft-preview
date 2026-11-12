@@ -4,7 +4,7 @@
 
   const notes = [];
   if (!status.hasLicense) notes.push("Нет ключа. Положи оба ключа в local/license.key и перезапусти.");
-  else if (status.licenseKind === "dashboards") notes.push("Сборка 7. Подставлен ключ Dashboards.");
+  else if (status.licenseKind === "dashboards") notes.push("Сборка 8. Подставлен ключ Dashboards.");
   else if (status.licenseKind === "reports") notes.push("В файле только ключ Reports. Для дашборда нужен ещё STIMULSOFT_DASHBOARDS_LICENSE_KEY.");
   if (!status.hasReport) notes.push("Нет отчёта. Положи .mrt в local/dashboard.mrt и перезапусти.");
   if (status.versionWarning) notes.push(status.versionWarning);
@@ -79,7 +79,7 @@
         console.error(name + " не нарисован: " + message);
         const bar = document.getElementById("bar");
         bar.className = "bad";
-        bar.textContent = "Сборка 7. " + name + " не нарисован: " + message;
+        bar.textContent = "Сборка 8. " + name + " не нарисован: " + message;
       }
     };
   }
@@ -168,7 +168,7 @@
     const seen = new Set();
     const lines = [];
     const show = (line) => {
-      line = "Сборка 7. " + line;
+      line = "Сборка 8. " + line;
       if (seen.has(line)) return;
       seen.add(line);
       lines.push(line);
@@ -286,47 +286,47 @@
             console.log(line);
             if (bar.className !== "bad") {
               bar.className = list.length ? "" : "bad";
-              bar.textContent = "Сборка 7. " + line;
+              bar.textContent = "Сборка 8. " + line;
             }
-            setTimeout(() => {
+            const drawLayer = (attempt) => {
               const node = [...document.querySelectorAll(".stiJsViewerPage")].find((item) => item.offsetWidth > 0);
-              const htmls = pictures.filter((item) => item.html);
-              if (node && !node.querySelector("iframe, svg") && pictures.length) {
-                pictures.forEach((item) => {
-                  if (!(item.width > 0) || !(item.height > 0)) return;
-                  const el = document.createElement("div");
-                  el.style.cssText = "position:absolute;overflow:hidden;box-sizing:border-box;left:"
-                    + item.left + "px;top:" + item.top + "px;width:" + item.width + "px;height:" + item.height + "px;"
-                    + (item.backColor ? "background:" + item.backColor + ";" : "");
-                  if (item.html) {
-                    const frame = document.createElement("iframe");
-                    frame.style.cssText = "border:0;width:100%;height:100%";
-                    frame.srcdoc = item.html;
-                    el.appendChild(frame);
-                  } else if (item.svg) {
-                    el.innerHTML = item.svg;
-                  }
-                  node.appendChild(el);
-                });
-              } else if (node) {
-                [...node.querySelectorAll("iframe")].forEach((frame, index) => {
-                  if (frame.getAttribute("srcdoc") || !htmls[index]) return;
-                  let filled = false;
-                  try {
-                    const body = frame.contentDocument && frame.contentDocument.body;
-                    filled = !!(body && body.childElementCount > 1);
-                  } catch (err) {
-                    filled = false;
-                  }
-                  if (!filled) frame.srcdoc = htmls[index].html;
-                });
+              if (!node) {
+                if (attempt < 8) {
+                  setTimeout(() => drawLayer(attempt + 1), 400);
+                  return;
+                }
+                if (bar.className !== "bad") bar.textContent += ". Страница для рисунка не найдена";
+                return;
               }
-              const frames = node ? node.querySelectorAll("iframe").length : 0;
-              const svgs = node ? node.querySelectorAll("svg").length : 0;
-              const seen = "На экране iframe " + frames + ", svg " + svgs;
+              if (node.querySelector(".sti-preview-layer")) return;
+              if (getComputedStyle(node).position === "static") node.style.position = "relative";
+              const layer = document.createElement("div");
+              layer.className = "sti-preview-layer";
+              layer.style.cssText = "position:absolute;left:0;top:0;width:" + (page.width || node.offsetWidth) + "px;height:" + (page.height || node.offsetHeight) + "px;z-index:5;";
+              let drawn = 0;
+              pictures.forEach((item) => {
+                if (!(item.width > 0) || !(item.height > 0) || (!item.html && !item.svg)) return;
+                const el = document.createElement("div");
+                el.style.cssText = "position:absolute;overflow:hidden;box-sizing:border-box;left:"
+                  + item.left + "px;top:" + item.top + "px;width:" + item.width + "px;height:" + item.height + "px;"
+                  + (item.backColor ? "background:" + item.backColor + ";" : "");
+                if (item.html) {
+                  const frame = document.createElement("iframe");
+                  frame.style.cssText = "border:0;width:100%;height:100%;background:#fff";
+                  frame.srcdoc = item.html;
+                  el.appendChild(frame);
+                } else {
+                  el.innerHTML = item.svg;
+                }
+                layer.appendChild(el);
+                drawn++;
+              });
+              node.appendChild(layer);
+              const seen = "Нарисовано блоков " + drawn;
               console.log(seen);
               if (bar.className !== "bad") bar.textContent += ". " + seen;
-            }, 300);
+            };
+            setTimeout(() => drawLayer(0), 300);
           } catch (err) {
             show(err && err.message ? err.message : String(err));
           }
