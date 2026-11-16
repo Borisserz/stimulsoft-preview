@@ -27,7 +27,7 @@ class ResultsDigestTests(unittest.TestCase):
         self.assertIn("row_count=2", digest)
 
     def test_digest_empty_results(self):
-        self.assertIn("NO RESULTS", build_results_digest({}))
+        self.assertIn("NO DATA", build_results_digest({}))
 
 
 class Utf8PackTests(unittest.TestCase):

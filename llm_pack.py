@@ -65,35 +65,21 @@ def build_results_digest(
     """Human-readable preview so you see names/numbers without scrolling the full pack."""
     results = dict(results or {})
     if not results:
-        return "NO RESULTS YET — wait for dashboard queries, then press refresh (not verify)."
-    lines: list[str] = [
-        "RESULTS DIGEST (only rows matching active map/drill filters):"
-    ]
-    shown = 0
+        return (
+            "NO DATA for current filters.\n"
+            "Click map/region/button, wait, press refresh.\n"
+            "Pack contains only rows matching active filters."
+        )
+    lines: list[str] = ["RESULTS (current filters only — nothing else):"]
     for name in sorted(results.keys()):
         payload = results.get(name) or {}
         rows = list(payload.get("rows") or [])
         row_count = payload.get("row_count", len(rows))
-        omitted = payload.get("omitted")
-        if omitted:
-            lines.append(
-                f"- {name}: OMITTED ({omitted}), "
-                f"unfiltered_was={payload.get('row_count_unfiltered', '?')}"
-            )
-            continue
-        if row_count == 0 and not rows:
-            lines.append(f"- {name}: row_count=0 (no rows after filter)")
-            continue
-        shown += 1
-        scope = payload.get("filter_scope")
-        extra = f" [{scope}]" if scope else ""
-        lines.append(f"- {name}: row_count={row_count}{extra}")
+        lines.append(f"- {name}: row_count={row_count}")
         for i, row in enumerate(rows[: max(0, max_rows_per_source)]):
             lines.append(f"    [{i}] {json.dumps(json_safe(row), ensure_ascii=False)}")
         if len(rows) > max_rows_per_source:
             lines.append(f"    ... +{len(rows) - max_rows_per_source} more rows")
-    if shown == 0:
-        lines.append("(no visible filtered rows — click map/region or clear filters)")
     return "\n".join(lines)
 
 
@@ -367,52 +353,80 @@ def _source_has_rule_columns(
     return False
 
 
+def _lean_result_payload(
+    payload: dict[str, Any], *, rows: list[Any], rules: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Only fields the LLM needs — no capture/apply noise."""
+    columns = payload.get("columns")
+    if not columns and rows and isinstance(rows[0], dict):
+        columns = list(rows[0].keys())
+    return {
+        "columns": list(columns or []),
+        "row_count": len(rows),
+        "rows": rows,
+        "filtered_by": rules,
+    }
+
+
 def apply_rules_to_results(
     results: dict[str, Any] | None,
     rules: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
-    """Keep only rows that match active filters (what the frontend would show).
+    """Keep ONLY real rows matching active filters — nothing else.
 
     - Strict column path match (no 'any cell equals value').
-    - Bulky sources without matching columns → rows cleared (not leaked).
-    - Singleton KPI rows without matching columns may passthrough.
+    - Sources without matching columns → dropped from pack.
+    - Sources with zero matching rows → dropped.
+    - No unfiltered KPI passthrough (those totals are wrong under a region filter).
     """
     results = {k: dict(v or {}) for k, v in dict(results or {}).items()}
     rules = list(rules or [])
     if not rules:
-        return results
-    out: dict[str, Any] = {}
+        # no active filter — still lean the payloads
+        out: dict[str, Any] = {}
+        for name, payload in results.items():
+            rows = list(payload.get("rows") or [])
+            if not rows:
+                continue
+            out[name] = _lean_result_payload(payload, rows=rows, rules=[])
+        return out
+    out = {}
     for name, payload in results.items():
         rows = list(payload.get("rows") or [])
         dict_rows = [r for r in rows if isinstance(r, dict)]
         if not dict_rows:
-            out[name] = payload
             continue
         if not _source_has_rule_columns(dict_rows, rules):
-            new_payload = dict(payload)
-            if len(dict_rows) <= 1:
-                # single aggregate KPI — keep, mark passthrough
-                new_payload["filter_scope"] = "passthrough_singleton"
-            else:
-                new_payload["rows"] = []
-                new_payload["row_count"] = 0
-                new_payload["row_count_unfiltered"] = len(rows)
-                new_payload["omitted"] = "no_column_for_active_filters"
-                new_payload["filtered_by"] = rules
-            out[name] = new_payload
             continue
         kept = [
             r
             for r in rows
             if isinstance(r, dict) and all(_row_matches_rule(r, rule) for rule in rules)
         ]
-        new_payload = dict(payload)
-        new_payload["rows"] = kept
-        new_payload["row_count"] = len(kept)
-        new_payload["row_count_unfiltered"] = len(rows)
-        new_payload["filtered_by"] = rules
-        out[name] = new_payload
+        if not kept:
+            continue
+        out[name] = _lean_result_payload(payload, rows=kept, rules=rules)
     return out
+
+
+def _slim_interaction(interaction: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Drop bulky Stimulsoft dumps; keep what the LLM needs about the click."""
+    if not interaction or not isinstance(interaction, dict):
+        return interaction
+    keep_keys = (
+        "action",
+        "event",
+        "element",
+        "button",
+        "button_checked",
+        "drill_down",
+        "drill_up",
+        "drill_level",
+        "dashboard_filters",
+        "apply_filter_count",
+    )
+    slim = {k: interaction[k] for k in keep_keys if k in interaction}
+    return slim or {"action": interaction.get("action")}
 
 
 def build_llm_pack(
@@ -432,25 +446,29 @@ def build_llm_pack(
     # Combine Apply-Filter + all drill levels; fall back to this event only
     rules = _dedupe_rules(applied + stacked) or event_rules
     raw_results = dict(results or {})
-    view_results = (
-        apply_rules_to_results(raw_results, rules)
-        if apply_dashboard_filters and rules
-        else raw_results
-    )
+    if apply_dashboard_filters:
+        view_results = apply_rules_to_results(raw_results, rules)
+    else:
+        view_results = apply_rules_to_results(raw_results, [])
     pack: dict[str, Any] = {
         "filters": dict(filters or {}),
-        "interaction": interaction,
+        "interaction": _slim_interaction(interaction),
         "results": view_results,
+        "dashboard_filters": rules,
     }
-    if rules:
-        pack["dashboard_filters"] = rules
     if drill_stack:
         pack["drill_level"] = len(drill_stack)
-        pack["drill_stack"] = list(drill_stack)
-    if apply_filters:
-        pack["apply_filters"] = list(apply_filters)
     if meta is not None:
-        pack["meta"] = dict(meta)
+        # keep meta small
+        pack["meta"] = {
+            k: meta[k]
+            for k in (
+                "filters_updated_at",
+                "drill_level",
+                "apply_filter_count",
+            )
+            if k in meta
+        }
     return json_safe(pack)
 
 

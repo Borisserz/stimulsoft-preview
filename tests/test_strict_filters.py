@@ -26,10 +26,10 @@ class StrictMatchTests(unittest.TestCase):
         }
         rules = [{"path": "region", "value": "1", "condition": "EqualTo"}]
         filtered = apply_rules_to_results(results, rules)
-        self.assertEqual(filtered["payments"]["row_count"], 0)
-        self.assertEqual(filtered["payments"]["rows"], [])
+        # no matching rows → source not included at all
+        self.assertEqual(filtered, {})
 
-    def test_omits_bulky_source_without_matching_column(self):
+    def test_drops_sources_without_matching_column(self):
         results = {
             "big_unrelated": {
                 "columns": ["x", "y"],
@@ -44,10 +44,10 @@ class StrictMatchTests(unittest.TestCase):
         }
         rules = [{"path": "region", "value": "Брестская", "condition": "EqualTo"}]
         filtered = apply_rules_to_results(results, rules)
-        self.assertEqual(filtered["big_unrelated"]["row_count"], 0)
-        self.assertEqual(filtered["big_unrelated"].get("omitted"), "no_column_for_active_filters")
-        # tiny KPI without column may passthrough
-        self.assertEqual(filtered["kpi_singleton"]["row_count"], 1)
+        # nothing extra — unrelated and unfiltered KPI are gone
+        self.assertNotIn("big_unrelated", filtered)
+        self.assertNotIn("kpi_singleton", filtered)
+        self.assertEqual(filtered, {})
 
     def test_strict_path_column_match(self):
         results = {
@@ -147,9 +147,25 @@ class FilterStateTests(unittest.TestCase):
             apply_filters=[],
         )
         self.assertEqual(pack["results"]["payments"]["row_count"], 2)
-        self.assertEqual(pack["results"]["noise"]["row_count"], 0)
+        self.assertNotIn("noise", pack["results"])
         names = {r["name"] for r in pack["results"]["payments"]["rows"]}
         self.assertEqual(names, {"Налог", "Пошлина"})
+        # payload is lean: only columns/row_count/rows (+ filtered_by)
+        pay = pack["results"]["payments"]
+        self.assertEqual(set(pay.keys()) & {"applied_params", "captured_at"}, set())
+
+    def test_zero_match_source_dropped(self):
+        filtered = apply_rules_to_results(
+            {
+                "payments": {
+                    "columns": ["region", "amount"],
+                    "row_count": 1,
+                    "rows": [{"region": "Минская", "amount": "20"}],
+                }
+            },
+            [{"path": "region", "value": "Брестская", "condition": "EqualTo"}],
+        )
+        self.assertEqual(filtered, {})
 
 
 if __name__ == "__main__":

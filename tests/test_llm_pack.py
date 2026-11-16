@@ -71,7 +71,10 @@ class BuildLlmPackTests(unittest.TestCase):
         self.assertEqual(pack["filters"]["Year"], "2025")
         self.assertEqual(pack["interaction"]["action"], "DashboardFiltering")
         self.assertEqual(pack["results"]["T"]["row_count"], 1)
-        self.assertEqual(set(pack.keys()), {"filters", "interaction", "results"})
+        self.assertIn("filters", pack)
+        self.assertIn("interaction", pack)
+        self.assertIn("results", pack)
+        self.assertIn("dashboard_filters", pack)
 
 
 class JsonSafeTests(unittest.TestCase):

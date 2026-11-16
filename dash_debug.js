@@ -411,45 +411,21 @@
     if (!keys.length) {
       return "NO RESULTS YET — wait for queries, then refresh.\n";
     }
-    var lines = [
-      "=== RESULTS DIGEST (only filtered / visible rows) ===",
-    ];
+    var lines = ["=== RESULTS (current filters only) ==="];
     if (pack.dashboard_filters && pack.dashboard_filters.length) {
-      lines.push(
-        "active_filters=" + JSON.stringify(pack.dashboard_filters)
-      );
+      lines.push("active_filters=" + JSON.stringify(pack.dashboard_filters));
     }
     if (typeof pack.drill_level === "number") {
       lines.push("drill_level=" + pack.drill_level);
     }
-    var shown = 0;
+    if (!keys.length) {
+      lines.push("(empty — no rows for current filters)");
+    }
     keys.sort().forEach(function (name) {
       var r = pack.results[name] || {};
       var rows = Array.isArray(r.rows) ? r.rows : [];
       var rc = typeof r.row_count === "number" ? r.row_count : rows.length;
-      if (r.omitted) {
-        lines.push(
-          "- " +
-            name +
-            ": OMITTED (" +
-            r.omitted +
-            "), was=" +
-            (r.row_count_unfiltered != null ? r.row_count_unfiltered : "?")
-        );
-        return;
-      }
-      if (rc === 0 && !rows.length) {
-        lines.push("- " + name + ": row_count=0");
-        return;
-      }
-      shown += 1;
-      lines.push(
-        "- " +
-          name +
-          ": row_count=" +
-          rc +
-          (r.filter_scope ? " [" + r.filter_scope + "]" : "")
-      );
+      lines.push("- " + name + ": row_count=" + rc);
       rows.slice(0, 5).forEach(function (row, i) {
         try {
           lines.push("    [" + i + "] " + JSON.stringify(row));
@@ -461,9 +437,6 @@
         lines.push("    ... +" + (rows.length - 5) + " more");
       }
     });
-    if (!shown) {
-      lines.push("(no visible filtered rows)");
-    }
     lines.push("=== FULL PACK JSON below ===");
     return lines.join("\n") + "\n";
   }

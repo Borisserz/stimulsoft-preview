@@ -135,9 +135,8 @@ class ApplyRulesTests(unittest.TestCase):
             filtered["dashboardReportsPaymentsRegion"]["rows"][0]["region"],
             "Брестская",
         )
-        # singleton without matching column may passthrough; multi-row noise is cleared
-        self.assertEqual(filtered["other"]["row_count"], 1)
-        self.assertEqual(filtered["other"].get("filter_scope"), "passthrough_singleton")
+        # unrelated source without filter column is dropped entirely
+        self.assertNotIn("other", filtered)
 
 if __name__ == "__main__":
     unittest.main()
