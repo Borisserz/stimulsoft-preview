@@ -1,4 +1,5 @@
 node_modules/
+.venv/
 local/
 *.mrt
 *.mrz
@@ -9,3 +10,5 @@ license.key
 db.env
 *.log
 .DS_Store
+__pycache__/
+*.pyc
