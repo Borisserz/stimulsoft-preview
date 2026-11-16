@@ -49,6 +49,7 @@ from stimulsoft_reports.viewer import StiViewer
 
 from llm_pack import (
     build_llm_pack,
+    build_results_digest,
     build_verify_report,
     dumps_llm_pack,
     is_real_filter_key,
@@ -416,6 +417,17 @@ def sti_process(component) -> bool:
     return handled
 
 
+def _force_utf8(resp):
+    """Stimulsoft Flask responses often omit charset → Windows shows □□□ / Unexpected token."""
+    if resp is None or not hasattr(resp, "headers"):
+        return resp
+    mime = (getattr(resp, "mimetype", None) or "").split(";")[0].strip()
+    current = resp.headers.get("Content-Type") or mime or "text/html"
+    base = current.split(";", 1)[0].strip() or mime or "text/html"
+    resp.headers["Content-Type"] = f"{base}; charset=utf-8"
+    return resp
+
+
 def sti_response(component, inject_debug: bool = False):
     component.handler.framework = StiFrameworkType.FLASK
     component.handler.passQueryParametersToReport = True
@@ -423,12 +435,20 @@ def sti_response(component, inject_debug: bool = False):
         component.handler.origin = request.origin or "*"
     resp = component.getFrameworkResponse()
     if inject_debug and hasattr(resp, "get_data") and hasattr(resp, "set_data"):
-        html = resp.get_data(as_text=True)
+        # decode as utf-8 explicitly (not latin-1) so Cyrillic in MRT stays intact
+        raw = resp.get_data()
+        html = raw.decode("utf-8", errors="replace")
         # inline script: avoids Windows encoding breakage of a separate .js fetch.
         # NOTE: do NOT key off "dashCaptureInteraction" — Stimulsoft already emits that name
         # from onInteraction += "dashCaptureInteraction" even when our script is missing.
         marker = "/* stimulsoft-llm-pack-debug */"
         if marker not in html:
+            if "<meta charset=" not in html.lower():
+                html = html.replace(
+                    "<head>",
+                    '<head><meta charset="utf-8">',
+                    1,
+                )
             js = _load_debug_js()
             tag = (
                 "<script type=\"text/javascript\">\n"
@@ -443,8 +463,8 @@ def sti_response(component, inject_debug: bool = False):
                 html = html.replace("</body>", tag + "</body>", 1)
             else:
                 html = html + tag
-            resp.set_data(html)
-    return resp
+            resp.set_data(html.encode("utf-8"))
+    return _force_utf8(resp)
 
 
 def remember_interaction(dump: Any) -> None:
@@ -522,14 +542,22 @@ def get_interactions():
 def get_llm_pack():
     """filters + interaction + results всех датасорсов — без SQL/логики MRT."""
     body = dumps_llm_pack(llm_pack_snapshot())
-    return Response(body, mimetype="application/json; charset=utf-8")
+    return Response(body.encode("utf-8"), content_type="application/json; charset=utf-8")
+
+
+@app.get("/api/llm-pack-digest")
+def get_llm_pack_digest():
+    """Короткий текст: имена датасорсов + первые строки (цифры/названия как на фронте)."""
+    with _params_lock:
+        text = build_results_digest(_RESULTS, max_rows_per_source=8)
+    return Response(text.encode("utf-8"), content_type="text/plain; charset=utf-8")
 
 
 @app.get("/api/verify")
 def get_verify():
     """Сверка: filters в store vs params, реально ушедшие в запросы, vs свежесть results."""
     body = dumps_llm_pack(verify_snapshot())
-    return Response(body, mimetype="application/json; charset=utf-8")
+    return Response(body.encode("utf-8"), content_type="application/json; charset=utf-8")
 
 
 @app.post("/api/params")
@@ -539,8 +567,17 @@ def post_params():
     body = request.get_json(silent=True) if request.is_json else None
     if isinstance(body, dict) and body.get("interaction") is not None:
         remember_interaction(body.get("interaction"))
-    updated = params_update(incoming)
-    return jsonify({"ok": True, "params": updated, "llm_pack": llm_pack_snapshot()})
+    # Do NOT clear results on map/button clicks — client-side filter often
+    # does not re-query, and wiping made the panel look "empty" after Брест.
+    # Year/Month reloads clear via prepare_variables instead.
+    updated = params_update(incoming, clear_results_on_change=False)
+    pack = llm_pack_snapshot()
+    return Response(
+        dumps_llm_pack(
+            {"ok": True, "params": sanitize_filters(updated), "llm_pack": pack}
+        ).encode("utf-8"),
+        content_type="application/json; charset=utf-8",
+    )
 
 
 @app.delete("/api/params")

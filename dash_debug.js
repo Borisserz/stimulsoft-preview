@@ -125,11 +125,42 @@
         }
       });
     }
+    function walkDashboardFilters(src, depth) {
+      if (src == null || depth > 8) return;
+      if (Array.isArray(src)) {
+        src.forEach(function (item) {
+          walkDashboardFilters(item, depth + 1);
+        });
+        return;
+      }
+      if (typeof src !== "object") return;
+      var col =
+        src.columnName ||
+        src.column ||
+        src.path ||
+        src.key ||
+        src.field ||
+        src.dataColumn;
+      if (col != null && isRealFilterKey(col)) {
+        if ("value" in src) put(col, src.value);
+        else if ("values" in src) put(col, src.values);
+        else if ("text" in src && typeof src.text !== "object") put(col, src.text);
+      }
+      Object.keys(src).forEach(function (k) {
+        if (k === "report") return;
+        var v = src[k];
+        if (v && typeof v === "object") walkDashboardFilters(v, depth + 1);
+      });
+    }
     PARAM_BAGS.forEach(function (bag) {
       walk(args[bag]);
     });
     // also top-level variables map if present
     if (args && args.variables) walk(args.variables);
+    // map region / table filters live in nested filteringParameters
+    if (args && args.filteringParameters) {
+      walkDashboardFilters(args.filteringParameters, 0);
+    }
     return params;
   }
 
@@ -171,10 +202,10 @@
     pre.style.cssText =
       "margin:0;padding:10px;overflow:auto;flex:1;white-space:pre-wrap;word-break:break-word;color:#bbf7d0;";
     pre.textContent =
-      "Click map / top buttons / filters.\n" +
-      "Panel: llm-pack JSON.\n" +
-      "Press verify: filters vs applied query params vs freshness.\n" +
-      "Header sources/rows must change after Year/Month change.";
+      "1) Wait for dashboard load.\n" +
+      "2) Press refresh — look for RESULTS DIGEST (names + numbers).\n" +
+      "3) Click map/region/top buttons, wait 1s, refresh again.\n" +
+      "verify = health check only (no table rows). Use refresh for data.";
     el.appendChild(head);
     el.appendChild(pre);
     (document.documentElement || document.body).appendChild(el);
@@ -198,15 +229,51 @@
     return el;
   }
 
-  function showPack(pack) {
+  function buildDigestText(pack) {
+    if (!pack || !pack.results || typeof pack.results !== "object") {
+      return "NO RESULTS in this payload.\nIf you pressed verify — press refresh instead.\n";
+    }
+    var keys = Object.keys(pack.results);
+    if (!keys.length) {
+      return "NO RESULTS YET — wait for queries, then refresh.\n";
+    }
+    var lines = ["=== RESULTS DIGEST (same numbers as SQL behind widgets) ==="];
+    keys.sort().forEach(function (name) {
+      var r = pack.results[name] || {};
+      var rows = Array.isArray(r.rows) ? r.rows : [];
+      var rc = typeof r.row_count === "number" ? r.row_count : rows.length;
+      lines.push("- " + name + ": row_count=" + rc);
+      rows.slice(0, 5).forEach(function (row, i) {
+        try {
+          lines.push("    [" + i + "] " + JSON.stringify(row));
+        } catch (e) {
+          lines.push("    [" + i + "] " + String(row));
+        }
+      });
+      if (rows.length > 5) {
+        lines.push("    ... +" + (rows.length - 5) + " more");
+      }
+    });
+    lines.push("=== FULL PACK JSON below ===");
+    return lines.join("\n") + "\n";
+  }
+
+  function showPack(pack, mode) {
     var el = ensurePanel();
     el.style.display = "flex";
     var actionEl = document.getElementById("dash-interaction-action");
     var metaEl = document.getElementById("dash-interaction-meta");
     var inter = pack && pack.interaction;
+    var isVerify =
+      mode === "verify" ||
+      (pack && typeof pack.ok === "boolean" && !pack.results);
     if (actionEl) {
-      actionEl.textContent =
-        (inter && (inter.action || inter.event)) || "(no interaction)";
+      if (isVerify) {
+        actionEl.textContent = pack && pack.ok ? "VERIFY OK" : "VERIFY FAIL";
+      } else {
+        actionEl.textContent =
+          (inter && (inter.action || inter.event)) || "(pack)";
+      }
     }
     if (metaEl) {
       var nFilters = pack && pack.filters ? Object.keys(pack.filters).length : 0;
@@ -219,7 +286,6 @@
           if (r && typeof r.row_count === "number") nRows += r.row_count;
         });
       } else if (pack && Array.isArray(pack.sources)) {
-        // /api/verify payload
         nResults = pack.sources.length;
         if (pack.result_meta) {
           Object.keys(pack.result_meta).forEach(function (k) {
@@ -242,7 +308,14 @@
     var pre = document.getElementById("dash-interaction-pre");
     if (pre) {
       try {
-        pre.textContent = JSON.stringify(pack, null, 2);
+        if (isVerify) {
+          pre.textContent =
+            "VERIFY has no table rows.\nPress refresh to see payment names/numbers.\n\n" +
+            JSON.stringify(pack, null, 2);
+        } else {
+          pre.textContent =
+            buildDigestText(pack) + JSON.stringify(pack, null, 2);
+        }
       } catch (e) {
         pre.textContent = String(pack);
       }
@@ -282,7 +355,7 @@
     if (llmPackTimer) clearTimeout(llmPackTimer);
     llmPackTimer = setTimeout(function () {
       fetchJson("/api/llm-pack", function (pack) {
-        showPack(pack);
+        showPack(pack, "pack");
         if (window.console && console.log) console.log("[llm-pack]", pack);
       });
     }, typeof delayMs === "number" ? delayMs : 600);
@@ -292,9 +365,7 @@
     if (llmPackTimer) clearTimeout(llmPackTimer);
     llmPackTimer = setTimeout(function () {
       fetchJson("/api/verify", function (rep) {
-        showPack(rep);
-        var actionEl = document.getElementById("dash-interaction-action");
-        if (actionEl) actionEl.textContent = rep.ok ? "VERIFY OK" : "VERIFY FAIL";
+        showPack(rep, "verify");
         if (window.console && console.log) console.log("[verify]", rep);
       });
     }, typeof delayMs === "number" ? delayMs : 0);

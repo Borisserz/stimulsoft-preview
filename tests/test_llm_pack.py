@@ -105,8 +105,7 @@ class JsonSafeTests(unittest.TestCase):
         self.assertIn("12.50", text)
         self.assertIn("2025-01-02", text)
         self.assertNotIn("Unexpected", text)
-        # ASCII-only JSON for Windows codepage safety
-        text.encode("ascii")
+        text.encode("utf-8")
         self.assertNotIn("\x00", text)
 
 if __name__ == "__main__":

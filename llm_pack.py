@@ -55,8 +55,28 @@ def json_safe(value: Any) -> Any:
 
 
 def dumps_llm_pack(pack: Any) -> str:
-    # ensure_ascii=True: pure ASCII JSON, no mojibake squares on Windows codepages
-    return json.dumps(json_safe(pack), ensure_ascii=True, indent=2)
+    # UTF-8 JSON with real Cyrillic (payment names). Caller MUST send charset=utf-8.
+    return json.dumps(json_safe(pack), ensure_ascii=False, indent=2)
+
+
+def build_results_digest(
+    results: dict[str, Any] | None, *, max_rows_per_source: int = 5
+) -> str:
+    """Human-readable preview so you see names/numbers without scrolling the full pack."""
+    results = dict(results or {})
+    if not results:
+        return "NO RESULTS YET — wait for dashboard queries, then press refresh (not verify)."
+    lines: list[str] = ["RESULTS DIGEST (names + numbers from SQL adapters):"]
+    for name in sorted(results.keys()):
+        payload = results.get(name) or {}
+        rows = list(payload.get("rows") or [])
+        row_count = payload.get("row_count", len(rows))
+        lines.append(f"- {name}: row_count={row_count}")
+        for i, row in enumerate(rows[: max(0, max_rows_per_source)]):
+            lines.append(f"    [{i}] {json.dumps(json_safe(row), ensure_ascii=False)}")
+        if len(rows) > max_rows_per_source:
+            lines.append(f"    ... +{len(rows) - max_rows_per_source} more rows")
+    return "\n".join(lines)
 
 
 def rows_as_records(
