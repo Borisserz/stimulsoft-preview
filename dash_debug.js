@@ -13,6 +13,7 @@
     "DashboardResetAllFilters",
     "DashboardElementDrillDown",
     "DashboardElementDrillUp",
+    "DashboardDrillDown",
     "DashboardButtonElementApplyEvents",
   ];
 
@@ -22,6 +23,7 @@
     "sortingParameters",
     "collapsingParameters",
     "drillDownParameters",
+    "dashboardElementDrillDownParameters",
   ];
 
   var llmPackTimer = null;
@@ -79,7 +81,25 @@
 
   function cloneFilteringParameters(fp) {
     // Stimulsoft often passes .NET-like dicts; JSON.stringify drops useful fields.
+    // Same shape is used for drillDownParameters on DashboardElementDrillDown.
     if (fp == null) return null;
+    if (Array.isArray(fp)) {
+      return fp.map(function (item) {
+        if (item && typeof item === "object" && item.filters) {
+          return cloneFilteringParameters(item);
+        }
+        if (item && typeof item === "object") {
+          return {
+            name: item.name != null ? item.name : null,
+            value: item.value !== undefined ? item.value : null,
+            key: item.key != null ? item.key : null,
+            path: item.path != null ? item.path : null,
+            condition: item.condition != null ? item.condition : null,
+          };
+        }
+        return safeClone(item);
+      });
+    }
     if (typeof fp !== "object") return fp;
     var out = {};
     var keys = [
@@ -142,7 +162,11 @@
         out[k] = "[StiReport]";
         continue;
       }
-      if (k === "filteringParameters") {
+      if (
+        k === "filteringParameters" ||
+        k === "drillDownParameters" ||
+        k === "dashboardElementDrillDownParameters"
+      ) {
         out[k] = cloneFilteringParameters(args[k]);
         continue;
       }
@@ -158,19 +182,29 @@
       "sortingParameters",
       "collapsingParameters",
       "drillDownParameters",
+      "dashboardElementDrillDownParameters",
       "filteringParameters",
       "data",
     ].forEach(function (k) {
       if (!(k in out) && args[k] !== undefined) {
         if (k === "report") out[k] = "[StiReport]";
-        else if (k === "filteringParameters")
+        else if (
+          k === "filteringParameters" ||
+          k === "drillDownParameters" ||
+          k === "dashboardElementDrillDownParameters"
+        )
           out[k] = cloneFilteringParameters(args[k]);
         else out[k] = safeClone(args[k]);
         out.__keys.push(k);
       }
     });
-    // normalize button identity for pack consumers
+    // normalize button / drill identity for pack consumers
     var fp = out.filteringParameters || {};
+    var dp =
+      out.drillDownParameters ||
+      out.dashboardElementDrillDownParameters ||
+      {};
+    if (!Array.isArray(dp) && dp.elementName) out.element = dp.elementName;
     if (fp.elementName) out.element = fp.elementName;
     if (fp.isChecked !== undefined) out.button_checked = !!fp.isChecked;
     if (
@@ -179,15 +213,31 @@
     ) {
       out.button = fp.elementName;
     }
-    if (fp.filters && fp.filters.length) {
-      out.dashboard_filters = fp.filters.map(function (f) {
-        return {
-          path: f.path,
+    if (
+      out.action &&
+      String(out.action).indexOf("DrillDown") >= 0 &&
+      String(out.action).indexOf("DrillUp") < 0
+    ) {
+      out.drill_down = true;
+    }
+    if (out.action && String(out.action).indexOf("DrillUp") >= 0) {
+      out.drill_up = true;
+    }
+    var filterBags = [];
+    if (fp && fp.filters) filterBags.push(fp.filters);
+    if (dp && !Array.isArray(dp) && dp.filters) filterBags.push(dp.filters);
+    var dashFilters = [];
+    filterBags.forEach(function (list) {
+      list.forEach(function (f) {
+        if (!f) return;
+        dashFilters.push({
+          path: f.path || f.name || f.key,
           value: f.value,
           condition: f.condition || "EqualTo",
-        };
+        });
       });
-    }
+    });
+    if (dashFilters.length) out.dashboard_filters = dashFilters;
     return out;
   }
 
@@ -276,12 +326,15 @@
     });
     // also top-level variables map if present
     if (args && args.variables) walk(args.variables);
-    // map region / table filters: { filters: [ {path, value} ] }
-    if (args && args.filteringParameters) {
-      var fp = args.filteringParameters;
-      walkDashboardFilters(fp, 0);
-      if (fp.filters) walkDashboardFilters(fp.filters, 0);
-    }
+    // map Apply-Filter + region drill-in (filters live in either bag)
+    ["filteringParameters", "drillDownParameters", "dashboardElementDrillDownParameters"].forEach(
+      function (bagName) {
+        var bag = args && args[bagName];
+        if (!bag) return;
+        walkDashboardFilters(bag, 0);
+        if (!Array.isArray(bag) && bag.filters) walkDashboardFilters(bag.filters, 0);
+      }
+    );
     return params;
   }
 
@@ -493,14 +546,21 @@
   }
 
   function refreshAfterInteraction(action) {
-    // Map filter is client-side — pack filters rows immediately.
-    // Buttons often re-query SQL after CheckedChanged — poll a few times.
-    var delays =
-      action === "DashboardButtonElementApplyEvents"
-        ? [600, 1400, 2600]
-        : action === "DashboardFiltering"
-          ? [400, 1200, 2200]
-          : [800, 1800];
+    // Map filter / element drill-in are mostly client-side — poll for pack.
+    // Buttons / dashboard drill-down often re-query SQL.
+    var delays = [500, 1200, 2400];
+    if (action === "DashboardButtonElementApplyEvents") {
+      delays = [600, 1400, 2600];
+    } else if (
+      action === "DashboardElementDrillDown" ||
+      action === "DashboardElementDrillUp" ||
+      action === "DashboardDrillDown" ||
+      action === "DrillDown"
+    ) {
+      delays = [400, 1000, 2000, 3200];
+    } else if (action === "DashboardFiltering") {
+      delays = [400, 1200, 2200];
+    }
     delays.forEach(function (ms) {
       refreshLlmPack(ms);
     });

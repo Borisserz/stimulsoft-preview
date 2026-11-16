@@ -119,47 +119,19 @@ def snapshot_from_data_args(args: Any) -> tuple[str, dict[str, Any] | None]:
     }
 
 
-def enrich_interaction(interaction: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Normalize button / map interaction for the LLM pack."""
-    if not interaction or not isinstance(interaction, dict):
-        return interaction
-    out = dict(interaction)
-    fp = out.get("filteringParameters")
-    if isinstance(fp, dict):
-        name = fp.get("elementName")
-        if name is not None:
-            out["element"] = str(name)
-        if "isChecked" in fp:
-            out["button_checked"] = bool(fp.get("isChecked"))
-        action = str(out.get("action") or "")
-        if "Button" in action or (
-            name is not None and str(name).startswith("Button")
-        ):
-            out["button"] = str(name)
-    rules = extract_dashboard_filter_rules(out)
-    if rules:
-        out["dashboard_filters"] = rules
-    return out
-
-
-def extract_dashboard_filter_rules(
-    interaction: dict[str, Any] | None,
-) -> list[dict[str, Any]]:
-    """Pull FilterRule path/value from Stimulsoft filteringParameters."""
-    if not interaction or not isinstance(interaction, dict):
-        return []
-    fp = interaction.get("filteringParameters") or {}
-    if not isinstance(fp, dict):
-        return []
-    raw = fp.get("filters") or []
+def _rules_from_filter_list(raw: Any) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         return []
     rules: list[dict[str, Any]] = []
     for item in raw:
         if not isinstance(item, dict):
             continue
-        path = item.get("path") or item.get("key") or item.get("column") or item.get(
-            "columnName"
+        path = (
+            item.get("path")
+            or item.get("column")
+            or item.get("columnName")
+            or item.get("name")
+            or item.get("key")
         )
         if path is None or path == "":
             continue
@@ -174,6 +146,110 @@ def extract_dashboard_filter_rules(
             }
         )
     return rules
+
+
+def _bags_with_filters(interaction: dict[str, Any]) -> list[dict[str, Any]]:
+    """Stimulsoft puts Apply-Filter in filteringParameters, region drill-in in drillDownParameters."""
+    bags: list[dict[str, Any]] = []
+    for key in (
+        "filteringParameters",
+        "drillDownParameters",
+        "dashboardElementDrillDownParameters",
+    ):
+        bag = interaction.get(key)
+        if isinstance(bag, dict):
+            bags.append(bag)
+        elif isinstance(bag, list):
+            # DashboardDrillDown / report DrillDown: list of param objects
+            for item in bag:
+                if isinstance(item, dict) and (
+                    "filters" in item or "path" in item or "value" in item
+                ):
+                    bags.append(item)
+    return bags
+
+
+def extract_dashboard_filter_rules(
+    interaction: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Pull FilterRule path/value from filter OR element-drill-down bags."""
+    if not interaction or not isinstance(interaction, dict):
+        return []
+    rules: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for bag in _bags_with_filters(interaction):
+        for rule in _rules_from_filter_list(bag.get("filters")):
+            key = (rule["path"], _norm(rule.get("value")))
+            if key in seen:
+                continue
+            seen.add(key)
+            rules.append(rule)
+        # single rule shaped object
+        for rule in _rules_from_filter_list([bag]):
+            key = (rule["path"], _norm(rule.get("value")))
+            if key in seen:
+                continue
+            seen.add(key)
+            rules.append(rule)
+    return rules
+
+
+def enrich_interaction(interaction: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Normalize button / map / drill-down interaction for the LLM pack."""
+    if not interaction or not isinstance(interaction, dict):
+        return interaction
+    out = dict(interaction)
+    action = str(out.get("action") or "")
+    for bag_key in (
+        "filteringParameters",
+        "drillDownParameters",
+        "dashboardElementDrillDownParameters",
+    ):
+        bag = out.get(bag_key)
+        if not isinstance(bag, dict):
+            continue
+        name = bag.get("elementName")
+        if name is not None and "element" not in out:
+            out["element"] = str(name)
+        if "isChecked" in bag:
+            out["button_checked"] = bool(bag.get("isChecked"))
+        if "Button" in action or (
+            name is not None and str(name).startswith("Button")
+        ):
+            out["button"] = str(name)
+    if "DrillDown" in action and "DrillUp" not in action:
+        out["drill_down"] = True
+    if "DrillUp" in action:
+        out["drill_up"] = True
+    rules = extract_dashboard_filter_rules(out)
+    if rules:
+        out["dashboard_filters"] = rules
+    return out
+
+
+def update_drill_stack(
+    stack: list[list[dict[str, Any]]] | None,
+    interaction: dict[str, Any] | None,
+) -> tuple[list[list[dict[str, Any]]], list[dict[str, Any]]]:
+    """Maintain region drill-in levels (DashboardElementDrillDown / DrillUp)."""
+    stack = [list(level) for level in list(stack or [])]
+    if not interaction or not isinstance(interaction, dict):
+        flat = [rule for level in stack for rule in level]
+        return stack, flat
+    action = str(interaction.get("action") or "")
+    rules = extract_dashboard_filter_rules(interaction)
+    if action == "DashboardElementDrillDown" and rules:
+        stack.append(rules)
+    elif action == "DashboardElementDrillUp":
+        if stack:
+            stack.pop()
+    elif action in {
+        "DashboardResetAllFilters",
+        "InitVars",
+    }:
+        stack.clear()
+    flat = [rule for level in stack for rule in level]
+    return stack, flat
 
 
 def _column_tail(name: Any) -> str:
@@ -247,9 +323,24 @@ def build_llm_pack(
     results: dict[str, Any] | None,
     meta: dict[str, Any] | None = None,
     apply_dashboard_filters: bool = True,
+    drill_stack: list[list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     interaction = enrich_interaction(interaction)
-    rules = extract_dashboard_filter_rules(interaction)
+    event_rules = extract_dashboard_filter_rules(interaction)
+    stacked = [rule for level in list(drill_stack or []) for rule in level]
+    # Prefer full drill stack (all levels); fall back to this event's rules
+    # (Apply Filter without element drill-down).
+    rules = stacked or event_rules
+    # de-dupe while preserving order
+    seen: set[tuple[str, str]] = set()
+    uniq: list[dict[str, Any]] = []
+    for rule in rules:
+        key = (str(rule.get("path")), _norm(rule.get("value")))
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(rule)
+    rules = uniq
     raw_results = dict(results or {})
     view_results = (
         apply_rules_to_results(raw_results, rules)
@@ -263,6 +354,9 @@ def build_llm_pack(
     }
     if rules:
         pack["dashboard_filters"] = rules
+    if drill_stack:
+        pack["drill_level"] = len(drill_stack)
+        pack["drill_stack"] = list(drill_stack)
     if meta is not None:
         pack["meta"] = dict(meta)
     return json_safe(pack)

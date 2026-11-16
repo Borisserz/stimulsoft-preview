@@ -56,6 +56,7 @@ from llm_pack import (
     is_real_filter_key,
     sanitize_filters,
     snapshot_from_data_args,
+    update_drill_stack,
 )
 
 ROOT = Path(__file__).resolve().parent
@@ -150,6 +151,8 @@ _APPLIED_LOG: list[dict[str, Any]] = []
 _APPLIED_LOG_MAX = 100
 # last BeginProcessData params per datasource (for verify / freshness)
 _PENDING_APPLY: dict[str, dict[str, Any]] = {}
+# region drill-in levels (DashboardElementDrillDown / DrillUp)
+_DRILL_STACK: list[list[dict[str, Any]]] = []
 
 
 def _now_stamp() -> str:
@@ -362,10 +365,12 @@ def llm_pack_snapshot() -> dict[str, Any]:
             filters=sanitize_filters(_PARAMS),
             interaction=_LAST_INTERACTION,
             results={k: dict(v) for k, v in _RESULTS.items()},
+            drill_stack=list(_DRILL_STACK),
             meta={
                 "filters_updated_at": _FILTERS_UPDATED_AT,
                 "sources": list(_RESULTS.keys()),
                 "applied_log_len": len(_APPLIED_LOG),
+                "drill_level": len(_DRILL_STACK),
             },
         )
 
@@ -469,11 +474,16 @@ def sti_response(component, inject_debug: bool = False):
 
 
 def remember_interaction(dump: Any) -> None:
-    global _LAST_INTERACTION
+    global _LAST_INTERACTION, _DRILL_STACK
     if not isinstance(dump, dict):
         dump = {"raw": dump}
     dump = enrich_interaction(dump) or dump
     with _params_lock:
+        _DRILL_STACK, flat = update_drill_stack(_DRILL_STACK, dump)
+        dump = dict(dump)
+        dump["drill_level"] = len(_DRILL_STACK)
+        if flat:
+            dump["dashboard_filters"] = flat
         _LAST_INTERACTION = dump
         _INTERACTIONS.append(dump)
         overflow = len(_INTERACTIONS) - _INTERACTIONS_MAX
@@ -484,7 +494,8 @@ def remember_interaction(dump: Any) -> None:
     rules = dump.get("dashboard_filters") or []
     print(
         f"[interaction] action={action!r} button={button!r} "
-        f"filters={len(rules)} keys={dump.get('__keys')}",
+        f"drill_level={dump.get('drill_level')} filters={len(rules)} "
+        f"keys={dump.get('__keys')}",
         flush=True,
     )
 
@@ -589,7 +600,7 @@ def post_params():
 
 @app.delete("/api/params")
 def clear_params():
-    global _LAST_INTERACTION, _FILTERS_UPDATED_AT, _FILTER_GEN
+    global _LAST_INTERACTION, _FILTERS_UPDATED_AT, _FILTER_GEN, _DRILL_STACK
     with _params_lock:
         _PARAMS.clear()
         _LAST_INTERACTION = None
@@ -597,6 +608,7 @@ def clear_params():
         _RESULTS.clear()
         _APPLIED_LOG.clear()
         _PENDING_APPLY.clear()
+        _DRILL_STACK = []
         _FILTERS_UPDATED_AT = None
         _FILTER_GEN += 1
     return jsonify({"ok": True, "params": {}, "llm_pack": llm_pack_snapshot()})
