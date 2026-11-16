@@ -327,11 +327,16 @@ def sti_response(component, inject_debug: bool = False):
     resp = component.getFrameworkResponse()
     if inject_debug and hasattr(resp, "get_data") and hasattr(resp, "set_data"):
         html = resp.get_data(as_text=True)
-        # inline script: avoids Windows encoding breakage of a separate .js fetch
-        if "dash-interaction-debug" not in html and "dashCaptureInteraction" not in html:
+        # inline script: avoids Windows encoding breakage of a separate .js fetch.
+        # NOTE: do NOT key off "dashCaptureInteraction" — Stimulsoft already emits that name
+        # from onInteraction += "dashCaptureInteraction" even when our script is missing.
+        marker = "/* stimulsoft-llm-pack-debug */"
+        if marker not in html:
             js = _load_debug_js()
             tag = (
                 "<script type=\"text/javascript\">\n"
+                + marker
+                + "\n"
                 + js
                 + "\n</script>\n"
             )
