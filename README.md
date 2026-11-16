@@ -1,43 +1,32 @@
 # stimulsoft-preview
 
-Stimulsoft **Dashboards.PYTHON 2024.2.2** — Flask designer + viewer.  
-`.mrt`, ключи и БД лежат в `local/` на машине (в git не попадают).
+Чистый **Stimulsoft Dashboards.PYTHON 2024.2.2** (Flask designer + viewer).  
+Как в рабочих `view_dashboard.py` / официальных sample: ручной `sti_process` (обход ImportError django), params, onInteraction.
 
-## Windows (основной путь)
+## Windows
 
 ```cmd
 git pull
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
+copy .env.example .env
+notepad .env
 ```
 
-В `local\` должны быть:
+В `.env` укажи:
 
-| файл | что |
-|------|-----|
-| `dashboard.mrt` | шаблон 2024 |
-| `license.key` | `STIMULSOFT_DASHBOARDS_LICENSE_KEY=...` (+ reports) |
-| `db.env` | `HOST` `PORT` `DATABASE` `USER` `PASSWORD` `SSL` |
+- `MRT_PATH=local\dashboard.mrt` (или полный путь к `.mrt`)
+- ключи `STIMULSOFT_DASHBOARDS_LICENSE_KEY` / `STIMULSOFT_REPORTS_LICENSE_KEY`
+- БД: `DATABASE_URL=...` **или** `POSTGRES_HOST` / `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD`
+
+Файлы секретов клади в `local\` (в git не попадают): `dashboard.mrt`, при желании копия ключей.
 
 ```cmd
-copy db.env.example local\db.env
-notepad local\db.env
 .venv\Scripts\python view_dashboard.py
 ```
 
-- Designer: http://127.0.0.1:8040/designer  
-- Viewer: http://127.0.0.1:8040/viewer  
-- Params: http://127.0.0.1:8040/api/params  
+- http://127.0.0.1:8040/designer  
+- http://127.0.0.1:8040/viewer  
+- http://127.0.0.1:8040/api/params  
 
-На viewer в углу — debug: список блоков и кнопок (`dash_debug.js`).
-
-Опционально `local\.env`: `MRT_PATH`, `VIEWER_PORT`, `DATABASE_URL`, …
-
-## Node-дизайнер 2024.2.6 (старый путь)
-
-```cmd
-npm install
-start.cmd
-```
-
-Откроет http://127.0.0.1:8080. Тот же `local\dashboard.mrt`, `local\license.key`, `local\db.env`.
+`dash_debug.js` — на viewer список блоков и кнопок.

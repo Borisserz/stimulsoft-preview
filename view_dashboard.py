@@ -15,15 +15,9 @@ Docs / samples:
   GET  /viewer?Region=West   (query → переменные mrt)
   клики/фильтры на дашборде → POST /api/params (onInteraction)
 
-local/ (в git не попадает):
-  dashboard.mrt
-  license.key   # STIMULSOFT_DASHBOARDS_LICENSE_KEY=... (+ reports)
-  db.env        # HOST PORT DATABASE USER PASSWORD SSL
-  .env          # опционально: MRT_PATH VIEWER_PORT DATABASE_URL …
-
 Запуск:
   .venv/bin/pip install -r requirements.txt
-  .venv/bin/python view_dashboard.py
+  MRT_PATH=твой.mrt .venv/bin/python view_dashboard.py
 """
 
 from __future__ import annotations
@@ -54,10 +48,10 @@ from stimulsoft_reports.report.enums.StiVariableType import StiVariableType
 from stimulsoft_reports.viewer import StiViewer
 
 ROOT = Path(__file__).resolve().parent
-LOCAL = ROOT / "local"
 
 
-def _parse_kv_file(path: Path, *, override: bool = False) -> None:
+def load_env() -> None:
+    path = ROOT / ".env"
     if not path.is_file():
         return
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -65,38 +59,7 @@ def _parse_kv_file(path: Path, *, override: bool = False) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, v = line.split("=", 1)
-        key = k.strip()
-        val = v.strip().strip("'\"")
-        if override or key not in os.environ or not os.environ.get(key, "").strip():
-            os.environ[key] = val
-
-
-def load_env() -> None:
-    """local/.env + root .env, затем local/license.key и local/db.env."""
-    _parse_kv_file(LOCAL / ".env")
-    _parse_kv_file(ROOT / ".env")
-    _parse_kv_file(LOCAL / "license.key")
-    db_env = LOCAL / "db.env"
-    if db_env.is_file():
-        raw: dict[str, str] = {}
-        for line in db_env.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            raw[k.strip().upper()] = v.strip().strip("'\"")
-        mapping = {
-            "HOST": "POSTGRES_HOST",
-            "PORT": "POSTGRES_PORT",
-            "DATABASE": "POSTGRES_DB",
-            "USER": "POSTGRES_USER",
-            "PASSWORD": "POSTGRES_PASSWORD",
-        }
-        for src, dst in mapping.items():
-            if raw.get(src) and not os.environ.get(dst, "").strip():
-                os.environ[dst] = raw[src]
-        if raw.get("SSL") and not os.environ.get("POSTGRES_SSL", "").strip():
-            os.environ["POSTGRES_SSL"] = raw["SSL"]
+        os.environ[k.strip()] = v.strip().strip("'\"")
 
 
 def path_of(raw: str) -> Path:
@@ -110,20 +73,16 @@ def apply_license(component) -> None:
         os.environ.get("STIMULSOFT_DASHBOARDS_LICENSE_KEY", "").strip()
         or os.environ.get("STIMULSOFT_REPORTS_LICENSE_KEY", "").strip()
         or os.environ.get("STIMULSOFT_LICENSE_KEY", "").strip()
-        or os.environ.get("DASHBOARDS_LICENSE_KEY", "").strip()
-        or os.environ.get("REPORTS_LICENSE_KEY", "").strip()
     )
     file_raw = (
         os.environ.get("STIMULSOFT_DASHBOARDS_LICENSE_FILE", "").strip()
         or os.environ.get("STIMULSOFT_REPORTS_LICENSE_FILE", "").strip()
         or os.environ.get("STIMULSOFT_LICENSE_FILE", "").strip()
     )
-    license_file = path_of(file_raw) if file_raw else LOCAL / "license.key"
     if key:
         component.license.setKey(key)
-    elif license_file.is_file() and "=" not in license_file.read_text(encoding="utf-8")[:200]:
-        # одиночный ключ в файле (не KEY=value)
-        component.license.setFile(str(license_file.resolve()))
+    elif file_raw:
+        component.license.setFile(str(path_of(file_raw).resolve()))
 
 
 load_env()
@@ -134,11 +93,9 @@ if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
 elif _mrt:
     MRT_PATH = path_of(_mrt)
 else:
-    MRT_PATH = LOCAL / "dashboard.mrt"
+    raise SystemExit("Задай MRT_PATH в .env")
 if not MRT_PATH.is_file():
-    raise SystemExit(
-        f"Нет .mrt: {MRT_PATH}\nПоложи файл в local/dashboard.mrt или задай MRT_PATH"
-    )
+    raise SystemExit(f"Нет .mrt: {MRT_PATH}")
 
 HOST = os.environ.get("VIEWER_HOST", "127.0.0.1")
 PORT = int(os.environ.get("VIEWER_PORT", "8040") or "8040")
@@ -164,10 +121,7 @@ if _db:
             f"User Id={u.username or ''}; Password={u.password or ''};"
         )
 if not PG_CONN:
-    raise SystemExit(
-        "Нет БД: local/db.env (HOST/DATABASE/USER/PASSWORD) "
-        "или DATABASE_URL / POSTGRES_* в local/.env"
-    )
+    raise SystemExit("Нет DATABASE_URL / POSTGRES_USER+PASSWORD+DB в .env")
 
 app = Flask(__name__)
 
@@ -373,7 +327,7 @@ def wire_viewer(viewer: StiViewer) -> None:
     viewer.handler.passQueryParametersToReport = True
     viewer.onBeginProcessData += begin_process_data
     viewer.onPrepareVariables += prepare_variables
-    # alnum → window.dashCaptureInteraction (stub в dash_debug.js)
+    # alnum → вызов window.dashCaptureInteraction(args) из dash_debug.js
     viewer.onInteraction += "dashCaptureInteraction"
 
 
@@ -497,8 +451,7 @@ def main() -> None:
             webbrowser.open(f"http://{HOST}:{PORT}/viewer")
         except Exception:
             pass
-    # load_dotenv=False: .env/local уже читаем сами; иначе Flask орёт про python-dotenv
-    app.run(host=HOST, port=PORT, debug=False, load_dotenv=False)
+    app.run(host=HOST, port=PORT, debug=False)
 
 
 if __name__ == "__main__":

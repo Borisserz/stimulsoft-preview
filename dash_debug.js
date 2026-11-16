@@ -1,4 +1,4 @@
-/* Отладка viewer: только список блоков и кнопок на странице. */
+/* Отладка viewer: блоки и кнопки на странице + stub для onInteraction. */
 (function () {
   "use strict";
 
@@ -17,14 +17,9 @@
       document.body;
 
     var blocks = [];
-    var blockSel = [
-      "[data-sti-component]",
-      ".stiDashboardElement",
-      ".stiJsViewerDashboardElement",
-      ".stiElement",
-      ".stiBlock",
-    ].join(",");
-    root.querySelectorAll(blockSel).forEach(function (el, i) {
+    root.querySelectorAll(
+      "[data-sti-component], .stiDashboardElement, .stiJsViewerDashboardElement, .stiElement, .stiBlock"
+    ).forEach(function (el, i) {
       blocks.push({
         i: i,
         tag: el.tagName,
@@ -36,7 +31,9 @@
     });
 
     var buttons = [];
-    root.querySelectorAll("button, [role='button'], input[type='button'], input[type='submit'], .stiButton, .stiToolButton").forEach(function (el, i) {
+    root.querySelectorAll(
+      "button, [role='button'], input[type='button'], input[type='submit'], .stiButton, .stiToolButton"
+    ).forEach(function (el, i) {
       buttons.push({
         i: i,
         tag: el.tagName,
@@ -62,11 +59,7 @@
         "border:1px solid #3a5;border-radius:8px;backdrop-filter:blur(4px);";
       document.documentElement.appendChild(panel);
     }
-    var lines = [
-      "blocks=" + data.blocks_count + " buttons=" + data.buttons_count,
-      "",
-      "— blocks —",
-    ];
+    var lines = ["blocks=" + data.blocks_count + " buttons=" + data.buttons_count, "", "— blocks —"];
     data.blocks.slice(0, 80).forEach(function (b) {
       lines.push("#" + b.i + " " + (b.name || b.id || b.className) + (b.text ? " | " + b.text : ""));
     });
@@ -85,9 +78,17 @@
   }
 
   window.dashDumpBlocksAndButtons = run;
-
-  // Нужен для viewer.onInteraction — без полного debug-захвата кликов.
-  window.dashCaptureInteraction = function () {};
+  window.dashCaptureInteraction = function (args) {
+    try {
+      var dump = args && typeof args === "object" ? Object.assign({ __keys: Object.keys(args) }, args) : { raw: args };
+      fetch("/api/params", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ interaction: dump }),
+      }).catch(function () {});
+    } catch (e) {}
+    setTimeout(run, 300);
+  };
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", function () {
