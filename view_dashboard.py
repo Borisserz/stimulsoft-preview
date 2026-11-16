@@ -198,7 +198,7 @@ def params_snapshot() -> dict[str, Any]:
 def params_update(values: dict[str, Any], *, clear_results_on_change: bool = True) -> dict[str, Any]:
     global _FILTERS_UPDATED_AT, _FILTER_GEN
     with _params_lock:
-        changed = False
+        real_changed = False
         for key, value in values.items():
             if not is_real_filter_key(key):
                 # UI junk from interaction flatten: "0","1","на 1 января" labels, __action
@@ -207,23 +207,25 @@ def params_update(values: dict[str, Any], *, clear_results_on_change: bool = Tru
             if value is None:
                 if key_s in _PARAMS:
                     _PARAMS.pop(key_s, None)
-                    changed = True
+                    real_changed = True
             else:
                 if _PARAMS.get(key_s) != value:
-                    changed = True
+                    real_changed = True
                 _PARAMS[key_s] = value
-        # drop any junk already sitting in the store
+        # drop junk already sitting in the store (does NOT bump generation alone)
         for junk in [k for k in list(_PARAMS.keys()) if not is_real_filter_key(k)]:
             _PARAMS.pop(junk, None)
-            changed = True
-        if changed:
+        if real_changed:
             _FILTERS_UPDATED_AT = _now_stamp()
             _FILTER_GEN += 1
             if clear_results_on_change:
                 # иначе в pack торчат старые rows (типа 2026-01-01) до нового пересчёта
                 _RESULTS.clear()
                 _PENDING_APPLY.clear()
-        return dict(_PARAMS)def coerce_value(type_name: str, value: Any) -> Any:
+        return dict(_PARAMS)
+
+
+def coerce_value(type_name: str, value: Any) -> Any:
     if value is None or type_name is None:
         return value
     if isinstance(value, (dict, list)):
