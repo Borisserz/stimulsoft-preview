@@ -81,55 +81,55 @@
     return out;
   }
 
+  function isRealFilterKey(name) {
+    if (name == null || name === "") return false;
+    var s = String(name);
+    if (s.indexOf("__") === 0) return false;
+    if (/^\d+$/.test(s)) return false;
+    return /^[A-Za-z_]/.test(s);
+  }
+
   function flattenParams(args) {
     var params = {};
     function put(name, value) {
-      if (name == null || name === "") return;
+      if (!isRealFilterKey(name)) return;
       params[String(name)] = value;
     }
-    function walk(src, prefix) {
+    function walk(src) {
       if (src == null) return;
       if (Array.isArray(src)) {
-        src.forEach(function (item, idx) {
-          if (item && typeof item === "object") {
-            if (item.name != null) put(item.name, item.value);
-            else if (prefix) put(prefix + "[" + idx + "]", item);
-            else walk(item, prefix);
-          } else if (prefix) {
-            put(prefix + "[" + idx + "]", item);
+        // only named variables: {name, value} — never index keys 0,1,2 with UI labels
+        src.forEach(function (item) {
+          if (item && typeof item === "object" && item.name != null) {
+            put(item.name, item.value);
           }
         });
         return;
       }
-      if (typeof src !== "object") {
-        if (prefix) put(prefix, src);
-        return;
-      }
+      if (typeof src !== "object") return;
       Object.keys(src).forEach(function (k) {
         var v = src[k];
         if (v && typeof v === "object" && "value" in v && !Array.isArray(v)) {
-          put(prefix ? prefix + "." + k : k, v.value);
-        } else if (v && typeof v === "object" && !Array.isArray(v)) {
-          var nestedKeys = Object.keys(v);
-          var looksNested = nestedKeys.some(function (nk) {
-            return v[nk] && typeof v[nk] === "object";
-          });
-          if (!looksNested && nestedKeys.length && nestedKeys.length <= 12) {
-            nestedKeys.forEach(function (nk) {
-              put((prefix ? prefix + "." : "") + k + "." + nk, v[nk]);
-            });
-          } else {
-            put(prefix ? prefix + "." + k : k, v);
-          }
-        } else {
-          put(prefix ? prefix + "." + k : k, v);
+          put(k, v.value);
+        } else if (v && typeof v === "object" && v.name != null && "value" in v) {
+          put(v.name, v.value);
+        } else if (
+          v == null ||
+          typeof v === "string" ||
+          typeof v === "number" ||
+          typeof v === "boolean"
+        ) {
+          put(k, v);
+        } else if (Array.isArray(v)) {
+          walk(v);
         }
       });
     }
     PARAM_BAGS.forEach(function (bag) {
-      walk(args[bag], bag === "variables" ? "" : bag);
+      walk(args[bag]);
     });
-    if (args.action) put("__action", args.action);
+    // also top-level variables map if present
+    if (args && args.variables) walk(args.variables);
     return params;
   }
 

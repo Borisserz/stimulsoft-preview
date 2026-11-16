@@ -51,6 +51,8 @@ from llm_pack import (
     build_llm_pack,
     build_verify_report,
     dumps_llm_pack,
+    is_real_filter_key,
+    sanitize_filters,
     snapshot_from_data_args,
 )
 
@@ -198,14 +200,22 @@ def params_update(values: dict[str, Any], *, clear_results_on_change: bool = Tru
     with _params_lock:
         changed = False
         for key, value in values.items():
+            if not is_real_filter_key(key):
+                # UI junk from interaction flatten: "0","1","на 1 января" labels, __action
+                continue
+            key_s = str(key)
             if value is None:
-                if key in _PARAMS:
-                    _PARAMS.pop(key, None)
+                if key_s in _PARAMS:
+                    _PARAMS.pop(key_s, None)
                     changed = True
             else:
-                if _PARAMS.get(key) != value:
+                if _PARAMS.get(key_s) != value:
                     changed = True
-                _PARAMS[key] = value
+                _PARAMS[key_s] = value
+        # drop any junk already sitting in the store
+        for junk in [k for k in list(_PARAMS.keys()) if not is_real_filter_key(k)]:
+            _PARAMS.pop(junk, None)
+            changed = True
         if changed:
             _FILTERS_UPDATED_AT = _now_stamp()
             _FILTER_GEN += 1
@@ -213,8 +223,7 @@ def params_update(values: dict[str, Any], *, clear_results_on_change: bool = Tru
                 # иначе в pack торчат старые rows (типа 2026-01-01) до нового пересчёта
                 _RESULTS.clear()
                 _PENDING_APPLY.clear()
-        return dict(_PARAMS)
-def coerce_value(type_name: str, value: Any) -> Any:
+        return dict(_PARAMS)def coerce_value(type_name: str, value: Any) -> Any:
     if value is None or type_name is None:
         return value
     if isinstance(value, (dict, list)):
@@ -346,7 +355,7 @@ def results_snapshot() -> dict[str, Any]:
 def llm_pack_snapshot() -> dict[str, Any]:
     with _params_lock:
         return build_llm_pack(
-            filters=dict(_PARAMS),
+            filters=sanitize_filters(_PARAMS),
             interaction=_LAST_INTERACTION,
             results={k: dict(v) for k, v in _RESULTS.items()},
             meta={
@@ -360,7 +369,7 @@ def llm_pack_snapshot() -> dict[str, Any]:
 def verify_snapshot() -> dict[str, Any]:
     with _params_lock:
         return build_verify_report(
-            filters=dict(_PARAMS),
+            filters=sanitize_filters(_PARAMS),
             results={k: dict(v) for k, v in _RESULTS.items()},
             filters_updated_at=_FILTERS_UPDATED_AT,
             applied_log=list(_APPLIED_LOG),

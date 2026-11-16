@@ -135,6 +135,22 @@ def _norm(value: Any) -> str:
     return text
 
 
+def is_real_filter_key(key: Any) -> bool:
+    """Drop UI junk from interaction flatten: '0','1', '__action', labels-as-keys."""
+    name = str(key or "").strip()
+    if not name or name.startswith("__"):
+        return False
+    if name.isdigit():
+        return False
+    # allow year/month/vtypevd/trendtype/... — must start with a letter
+    first = name[0]
+    return first.isalpha() or first == "_"
+
+
+def sanitize_filters(filters: dict[str, Any] | None) -> dict[str, Any]:
+    return {str(k): v for k, v in dict(filters or {}).items() if is_real_filter_key(k)}
+
+
 def build_verify_report(
     *,
     filters: dict[str, Any] | None,
@@ -143,12 +159,12 @@ def build_verify_report(
     applied_log: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
     """Compare store filters vs last applied query params vs captured results freshness."""
-    filters = dict(filters or {})
+    filters = sanitize_filters(filters)
     results = dict(results or {})
     applied_log = list(applied_log or [])
     issues: list[str] = []
 
-    filter_keys = {k for k in filters.keys() if not str(k).startswith("__")}
+    filter_keys = set(filters.keys())
     # latest apply per datasource
     latest: dict[str, dict[str, Any]] = {}
     for item in applied_log:
@@ -157,7 +173,8 @@ def build_verify_report(
             latest[ds] = item
 
     for ds, item in latest.items():
-        applied = dict(item.get("applied_params") or {})
+        applied = sanitize_filters(dict(item.get("applied_params") or {}))
+        matched = False
         for key in filter_keys:
             if key not in applied:
                 continue
@@ -165,8 +182,10 @@ def build_verify_report(
                 issues.append(
                     f"mismatch:{ds}:{key}:filter={filters.get(key)!r}:applied={applied.get(key)!r}"
                 )
+            else:
+                matched = True
 
-        snap = dict(item.get("filters_snapshot") or {})
+        snap = sanitize_filters(dict(item.get("filters_snapshot") or {}))
         for key in filter_keys:
             if key in snap and _norm(snap.get(key)) != _norm(filters.get(key)):
                 issues.append(
@@ -174,12 +193,20 @@ def build_verify_report(
                 )
 
         captured_at = str(item.get("captured_at") or "")
-        if filters_updated_at and captured_at and captured_at < str(filters_updated_at):
-            issues.append(f"stale:{ds}:captured_at={captured_at}:filters_updated_at={filters_updated_at}")
+        # stale only if timestamps say so AND applied params don't already match filters
+        if (
+            filters_updated_at
+            and captured_at
+            and captured_at < str(filters_updated_at)
+            and not matched
+        ):
+            issues.append(
+                f"stale:{ds}:captured_at={captured_at}:filters_updated_at={filters_updated_at}"
+            )
 
     if not results:
         issues.append("empty_results")
-    if filter_keys and not latest:
+    if filter_keys and not latest and not results:
         issues.append("no_applied_queries_yet")
 
     return json_safe(
@@ -195,7 +222,9 @@ def build_verify_report(
                 name: {
                     "row_count": (payload or {}).get("row_count"),
                     "captured_at": (payload or {}).get("captured_at"),
-                    "applied_params": (payload or {}).get("applied_params"),
+                    "applied_params": sanitize_filters(
+                        (payload or {}).get("applied_params") or {}
+                    ),
                 }
                 for name, payload in results.items()
             },

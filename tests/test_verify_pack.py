@@ -5,7 +5,13 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from llm_pack import build_llm_pack, build_verify_report, snapshot_from_data_args
+from llm_pack import (
+    build_llm_pack,
+    build_verify_report,
+    is_real_filter_key,
+    sanitize_filters,
+    snapshot_from_data_args,
+)
 
 
 class VerifyReportTests(unittest.TestCase):
@@ -81,6 +87,55 @@ class BuildPackMetaTests(unittest.TestCase):
             meta={"filters_updated_at": "x"},
         )
         self.assertEqual(pack["meta"]["filters_updated_at"], "x")
+
+
+class SanitizeFilterKeysTests(unittest.TestCase):
+    def test_drops_numeric_and_dunder_keys(self):
+        self.assertFalse(is_real_filter_key("0"))
+        self.assertFalse(is_real_filter_key("2"))
+        self.assertFalse(is_real_filter_key("__action"))
+        self.assertTrue(is_real_filter_key("year"))
+        self.assertTrue(is_real_filter_key("month"))
+        cleaned = sanitize_filters(
+            {
+                "0": "",
+                "1": "на 1 января",
+                "2": "2026",
+                "__action": "Variables",
+                "year": "2025",
+                "month": "2",
+            }
+        )
+        self.assertEqual(cleaned, {"year": "2025", "month": "2"})
+
+    def test_verify_ignores_junk_keys_in_filters(self):
+        report = build_verify_report(
+            filters={
+                "0": "x",
+                "year": "2025",
+                "month": "2",
+                "__action": "Variables",
+            },
+            results={
+                "T": {
+                    "row_count": 1,
+                    "captured_at": "2026-11-16 10:57:50",
+                    "applied_params": {"year": "2025", "month": "2"},
+                }
+            },
+            filters_updated_at="2026-11-16 10:57:47",
+            applied_log=[
+                {
+                    "dataSource": "T",
+                    "applied_params": {"year": "2025", "month": "2"},
+                    "filters_snapshot": {"year": "2025", "month": "2"},
+                    "row_count": 1,
+                    "captured_at": "2026-11-16 10:57:50",
+                }
+            ],
+        )
+        self.assertTrue(report["ok"])
+        self.assertNotIn("0", report["filters"])
 
 
 if __name__ == "__main__":
