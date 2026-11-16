@@ -70,14 +70,28 @@
     var path =
       item.path != null && item.path !== ""
         ? item.path
-        : item.columnName || item.column || null;
+        : item.columnName || item.column || item.columnPath || null;
     var condition = item.condition != null ? item.condition : "EqualTo";
+    var value =
+      item.value !== undefined
+        ? item.value
+        : item.Value !== undefined
+          ? item.Value
+          : item.elementArgument !== undefined
+            ? item.elementArgument
+            : null;
     // Region map: MapEqualTo often has path=null — keep value under path "map"
     if (
       (path == null || path === "") &&
-      item.value !== undefined &&
-      item.value !== null &&
-      item.value !== ""
+      value !== undefined &&
+      value !== null &&
+      value !== ""
+    ) {
+      path = "map";
+    }
+    if (
+      (condition === "MapEqualTo" || condition === "mapEqualTo") &&
+      (path == null || path === "")
     ) {
       path = "map";
     }
@@ -86,7 +100,7 @@
       key: item.key != null ? item.key : null,
       path: path,
       condition: condition,
-      value: item.value !== undefined ? item.value : null,
+      value: value,
       value2: item.value2 !== undefined ? item.value2 : null,
       path2: item.path2 != null ? item.path2 : null,
       isEnabled: item.isEnabled !== undefined ? item.isEnabled : true,

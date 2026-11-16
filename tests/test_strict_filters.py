@@ -223,6 +223,38 @@ class FilterStateTests(unittest.TestCase):
         self.assertEqual(stack, [])
         self.assertEqual(combined, [])
 
+    def test_init_vars_does_not_wipe_map(self):
+        apply_f, stack, combined = update_filter_state(
+            [{"path": "map", "value": "Брестская", "condition": "MapEqualTo"}],
+            [[{"path": "map", "value": "Пинск", "condition": "MapEqualTo"}]],
+            {"action": "InitVars"},
+        )
+        self.assertEqual(len(apply_f), 1)
+        self.assertEqual(len(stack), 1)
+        self.assertEqual([r["value"] for r in combined], ["Брестская", "Пинск"])
+
+    def test_unparseable_filtering_does_not_wipe_map(self):
+        apply_f, stack, combined = update_filter_state(
+            [{"path": "map", "value": "Брестская", "condition": "MapEqualTo"}],
+            [],
+            {
+                "action": "DashboardFiltering",
+                "filteringParameters": {"elementName": "Map1"},
+            },
+        )
+        self.assertEqual([r["value"] for r in combined], ["Брестская"])
+
+    def test_explicit_empty_filters_clears_map(self):
+        apply_f, stack, combined = update_filter_state(
+            [{"path": "map", "value": "Брестская", "condition": "MapEqualTo"}],
+            [],
+            {
+                "action": "DashboardFiltering",
+                "filteringParameters": {"elementName": "Map1", "filters": []},
+            },
+        )
+        self.assertEqual(combined, [])
+
     def test_pack_hides_extra_rows(self):
         pack = build_llm_pack(
             filters={},

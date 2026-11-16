@@ -110,8 +110,18 @@ def build_compare_text(pack: dict[str, Any] | None, *, max_rows: int = 12) -> st
                 f"  ({rule.get('condition') or 'equalTo'})"
             )
     else:
-        lines.append("   (net — esli uzhe provalilsya v oblast, zhmi SVERKA snova)")
-        lines.append("   (esli vse eshche net — smotri action v p.3)")
+        lines.append("   (net — filtry karty ne pojmany)")
+        inter_peek = dict(pack.get("interaction") or {})
+        for bag_name in (
+            "filteringParameters",
+            "drillDownParameters",
+            "dashboardFilteringParameters",
+            "dashboardElementDrillDownParameters",
+        ):
+            bag = inter_peek.get(bag_name)
+            if bag is None:
+                continue
+            lines.append(f"   raw.{bag_name} = {json.dumps(json_safe(bag), ensure_ascii=False)}")
 
     inter = dict(pack.get("interaction") or {})
     lines.append("")
@@ -123,6 +133,8 @@ def build_compare_text(pack: dict[str, Any] | None, *, max_rows: int = 12) -> st
         lines.append(f"   element = {inter.get('element')}")
     if pack.get("drill_level") is not None:
         lines.append(f"   drill_level = {pack.get('drill_level')}")
+    if inter.get("__keys"):
+        lines.append(f"   keys = {inter.get('__keys')}")
 
     results = dict(pack.get("results") or {})
     lines.append("")
@@ -248,10 +260,15 @@ def _rules_from_filter_list(raw: Any) -> list[dict[str, Any]]:
 
 
 def _bags_with_filters(interaction: dict[str, Any]) -> list[dict[str, Any]]:
-    """Stimulsoft puts Apply-Filter in filteringParameters, region drill-in in drillDownParameters."""
+    """Stimulsoft remaps dashboardFilteringParameters → filteringParameters in onInteraction.
+
+    Region map Apply-Filter → filteringParameters.filters (MapEqualTo, often path=null).
+    Element drill → drillDownParameters.filters (same shape).
+    """
     bags: list[dict[str, Any]] = []
     for key in (
         "filteringParameters",
+        "dashboardFilteringParameters",
         "drillDownParameters",
         "dashboardElementDrillDownParameters",
     ):
@@ -269,6 +286,14 @@ def _bags_with_filters(interaction: dict[str, Any]) -> list[dict[str, Any]]:
                 ):
                     bags.append(item)
     return bags
+
+
+def _explicit_empty_filter_bags(interaction: dict[str, Any]) -> bool:
+    """True only when Stimulsoft sent filters: [] (user cleared selection)."""
+    for bag in _bags_with_filters(interaction):
+        if isinstance(bag.get("filters"), list):
+            return len(bag["filters"]) == 0
+    return False
 
 
 def extract_dashboard_filter_rules(
@@ -387,9 +412,13 @@ def update_filter_state(
 
     if action == "DashboardFiltering":
         # Merge by path: second element click must not wipe the first filter.
-        # Empty list = user cleared map selection.
+        # Clear map ONLY when Stimulsoft sent filters: [] (deselected all).
+        # Do NOT clear on unparseable / missing bags — that wiped Brest/Pinsk.
         if not rules:
-            apply_filters = [r for r in apply_filters if str(r.get("path")) != "map"]
+            if _explicit_empty_filter_bags(interaction):
+                apply_filters = [
+                    r for r in apply_filters if str(r.get("path")) != "map"
+                ]
         else:
             by_path = {str(r.get("path")): r for r in apply_filters}
             # multiple MapEqualTo values (Брест + Пинск) — keep all map values
@@ -410,9 +439,12 @@ def update_filter_state(
     elif action == "DashboardElementDrillUp":
         if drill_stack:
             drill_stack.pop()
-    elif action in {"DashboardResetAllFilters", "InitVars"}:
+    elif action == "DashboardResetAllFilters":
         apply_filters = []
         drill_stack.clear()
+    elif action == "InitVars":
+        # Viewer fires InitVars on load/reload — must NOT wipe map/drill filters.
+        pass
     elif action == "DashboardDrillDown" and rules:
         # Opening nested dashboard with parameters — treat as apply filters
         apply_filters = _dedupe_rules(apply_filters + rules)
@@ -598,6 +630,12 @@ def _slim_interaction(interaction: dict[str, Any] | None) -> dict[str, Any] | No
         "drill_level",
         "dashboard_filters",
         "apply_filter_count",
+        # keep bags so SVERKA can show why map filters are empty
+        "filteringParameters",
+        "dashboardFilteringParameters",
+        "drillDownParameters",
+        "dashboardElementDrillDownParameters",
+        "__keys",
     )
     slim = {k: interaction[k] for k in keep_keys if k in interaction}
     return slim or {"action": interaction.get("action")}
