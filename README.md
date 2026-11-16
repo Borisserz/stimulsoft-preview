@@ -28,5 +28,6 @@ notepad .env
 - http://127.0.0.1:8040/designer  
 - http://127.0.0.1:8040/viewer  
 - http://127.0.0.1:8040/api/params  
+- http://127.0.0.1:8040/api/llm-pack — `{filters, interaction, results}` для LLM (без SQL)
 
-`dash_debug.js` — на viewer список блоков и кнопок.
+На viewer в углу — debug-панель: после клика по карте/кнопкам/фильтрам показывает JSON llm-pack.

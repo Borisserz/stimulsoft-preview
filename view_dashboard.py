@@ -47,6 +47,8 @@ from stimulsoft_reports.report.dictionary.StiVariable import StiVariable
 from stimulsoft_reports.report.enums.StiVariableType import StiVariableType
 from stimulsoft_reports.viewer import StiViewer
 
+from llm_pack import build_llm_pack, snapshot_from_data_args
+
 ROOT = Path(__file__).resolve().parent
 
 
@@ -131,6 +133,8 @@ _PARAMS: dict[str, Any] = {}
 _LAST_INTERACTION: dict[str, Any] | None = None
 _INTERACTIONS: list[dict[str, Any]] = []
 _INTERACTIONS_MAX = 50
+# Результаты датасорсов после onEndProcessData (без SQL) — для LLM pack.
+_RESULTS: dict[str, Any] = {}
 
 _STI_QUERY_SKIP = {"sti_event", "sti_data", "sti_handler"}
 _DEBUG_JS = (ROOT / "dash_debug.js").read_text(encoding="utf-8")
@@ -255,6 +259,29 @@ def begin_process_data(args: StiDataEventArgs) -> None:
             param.value = incoming[name]
 
 
+def end_process_data(args: StiDataEventArgs) -> None:
+    """Сохраняем готовые rows датасорса (карта/таблица/KPI) без SQL."""
+    name, payload = snapshot_from_data_args(args)
+    if payload is None:
+        return
+    with _params_lock:
+        _RESULTS[name] = payload
+
+
+def results_snapshot() -> dict[str, Any]:
+    with _params_lock:
+        return {k: dict(v) for k, v in _RESULTS.items()}
+
+
+def llm_pack_snapshot() -> dict[str, Any]:
+    with _params_lock:
+        return build_llm_pack(
+            filters=dict(_PARAMS),
+            interaction=_LAST_INTERACTION,
+            results={k: dict(v) for k, v in _RESULTS.items()},
+        )
+
+
 def prepare_variables(args: StiVariablesEventArgs) -> None:
     apply_params_to_variables(args)
 
@@ -326,6 +353,7 @@ def wire_viewer(viewer: StiViewer) -> None:
     viewer.options.appearance.fullScreenMode = True
     viewer.handler.passQueryParametersToReport = True
     viewer.onBeginProcessData += begin_process_data
+    viewer.onEndProcessData += end_process_data
     viewer.onPrepareVariables += prepare_variables
     # alnum → вызов window.dashCaptureInteraction(args) из dash_debug.js
     viewer.onInteraction += "dashCaptureInteraction"
@@ -336,6 +364,7 @@ def wire_designer(designer: StiDesigner) -> None:
     designer.options.appearance.fullScreenMode = True
     designer.handler.passQueryParametersToReport = True
     designer.onBeginProcessData += begin_process_data
+    designer.onEndProcessData += end_process_data
     designer.onPrepareVariables += prepare_variables
     designer.onSaveReport += save_report
     designer.onSaveAsReport += save_report
@@ -361,6 +390,7 @@ def get_params():
                 "params": dict(_PARAMS),
                 "interaction": _LAST_INTERACTION,
                 "interactions_count": len(_INTERACTIONS),
+                "results_count": len(_RESULTS),
             }
         )
 
@@ -371,6 +401,12 @@ def get_interactions():
         return jsonify({"interactions": list(_INTERACTIONS)})
 
 
+@app.get("/api/llm-pack")
+def get_llm_pack():
+    """filters + interaction + results всех датасорсов — без SQL/логики MRT."""
+    return jsonify(llm_pack_snapshot())
+
+
 @app.post("/api/params")
 def post_params():
     incoming = _body_params()
@@ -379,7 +415,7 @@ def post_params():
     if isinstance(body, dict) and body.get("interaction") is not None:
         remember_interaction(body.get("interaction"))
     updated = params_update(incoming)
-    return jsonify({"ok": True, "params": updated})
+    return jsonify({"ok": True, "params": updated, "llm_pack": llm_pack_snapshot()})
 
 
 @app.delete("/api/params")
@@ -389,8 +425,8 @@ def clear_params():
         _PARAMS.clear()
         _LAST_INTERACTION = None
         _INTERACTIONS.clear()
-    return jsonify({"ok": True, "params": {}})
-
+        _RESULTS.clear()
+    return jsonify({"ok": True, "params": {}, "llm_pack": llm_pack_snapshot()})
 
 @app.route("/mrt", methods=["GET", "POST"])
 def serve_mrt():
@@ -445,6 +481,7 @@ def main() -> None:
     print(f"Designer: http://{HOST}:{PORT}/designer", flush=True)
     print(f"Viewer:   http://{HOST}:{PORT}/viewer", flush=True)
     print(f"Params:   POST/GET http://{HOST}:{PORT}/api/params", flush=True)
+    print(f"LLM pack: GET http://{HOST}:{PORT}/api/llm-pack", flush=True)
     print(f"Clicks:   GET http://{HOST}:{PORT}/api/interactions", flush=True)
     if OPEN_BROWSER:
         try:

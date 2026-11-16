@@ -134,6 +134,9 @@
     return params;
   }
 
+  var llmPackTimer = null;
+  var lastInteractionDump = null;
+
   function ensurePanel() {
     var el = document.getElementById("dash-interaction-debug");
     if (el) return el;
@@ -144,8 +147,8 @@
       "right:8px",
       "bottom:8px",
       "z-index:2147483647",
-      "width:min(520px,46vw)",
-      "max-height:48vh",
+      "width:min(560px,48vw)",
+      "max-height:55vh",
       "display:flex",
       "flex-direction:column",
       "background:#0b1220",
@@ -157,11 +160,13 @@
     ].join(";");
     var head = document.createElement("div");
     head.style.cssText =
-      "display:flex;align-items:center;gap:8px;padding:8px 10px;background:#111827;border-bottom:1px solid #334155;cursor:move;user-select:none;";
+      "display:flex;align-items:center;gap:8px;padding:8px 10px;background:#111827;border-bottom:1px solid #334155;cursor:move;user-select:none;flex-wrap:wrap;";
     head.innerHTML =
-      '<strong style="color:#86efac">interaction</strong>' +
+      '<strong style="color:#86efac">llm-pack</strong>' +
       '<span id="dash-interaction-action" style="color:#93c5fd"></span>' +
-      '<span style="margin-left:auto;color:#94a3b8">click dashboard</span>' +
+      '<span id="dash-interaction-meta" style="color:#94a3b8"></span>' +
+      '<span style="margin-left:auto;color:#94a3b8">filters + results</span>' +
+      '<button type="button" id="dash-interaction-refresh" style="background:#1f2937;color:#e2e8f0;border:1px solid #475569;padding:2px 8px;cursor:pointer">refresh</button>' +
       '<button type="button" id="dash-interaction-clear" style="background:#1f2937;color:#e2e8f0;border:1px solid #475569;padding:2px 8px;cursor:pointer">clear</button>' +
       '<button type="button" id="dash-interaction-hide" style="background:#1f2937;color:#e2e8f0;border:1px solid #475569;padding:2px 8px;cursor:pointer">hide</button>';
     var pre = document.createElement("pre");
@@ -169,9 +174,9 @@
     pre.style.cssText =
       "margin:0;padding:10px;overflow:auto;flex:1;white-space:pre-wrap;word-break:break-word;color:#bbf7d0;";
     pre.textContent =
-      "Кликай по элементам дашборда — сюда придёт полный args.\n\n" +
-      "actions:\n- " +
-      ACTIONS.join("\n- ");
+      "Кликай карту / кнопки / фильтры — сюда придёт JSON для LLM:\n" +
+      "{ filters, interaction, results }\n\n" +
+      "results = данные всех датасорсов после Stimulsoft (без SQL).";
     el.appendChild(head);
     el.appendChild(pre);
     document.body.appendChild(el);
@@ -180,25 +185,74 @@
     };
     document.getElementById("dash-interaction-clear").onclick = function () {
       pre.textContent = "";
-      fetch("/api/params", { method: "DELETE" }).catch(function () {});
+      lastInteractionDump = null;
+      fetch("/api/params", { method: "DELETE" })
+        .then(function () {
+          return refreshLlmPack(0);
+        })
+        .catch(function () {});
+    };
+    document.getElementById("dash-interaction-refresh").onclick = function () {
+      refreshLlmPack(0);
     };
     return el;
   }
 
-  function showDump(dump) {
+  function showPack(pack) {
     var el = ensurePanel();
     el.style.display = "flex";
     var actionEl = document.getElementById("dash-interaction-action");
-    if (actionEl) actionEl.textContent = dump.action || "(no action)";
+    var metaEl = document.getElementById("dash-interaction-meta");
+    var inter = pack && pack.interaction;
+    if (actionEl) {
+      actionEl.textContent =
+        (inter && (inter.action || inter.event)) || "(no interaction)";
+    }
+    if (metaEl) {
+      var nFilters = pack && pack.filters ? Object.keys(pack.filters).length : 0;
+      var nResults = pack && pack.results ? Object.keys(pack.results).length : 0;
+      var nRows = 0;
+      if (pack && pack.results) {
+        Object.keys(pack.results).forEach(function (k) {
+          var r = pack.results[k];
+          if (r && typeof r.row_count === "number") nRows += r.row_count;
+        });
+      }
+      metaEl.textContent =
+        "filters=" + nFilters + " sources=" + nResults + " rows=" + nRows;
+    }
     var pre = document.getElementById("dash-interaction-pre");
-    if (pre) pre.textContent = JSON.stringify(dump, null, 2);
+    if (pre) pre.textContent = JSON.stringify(pack, null, 2);
+    window.__llmPack = pack;
+  }
+
+  function refreshLlmPack(delayMs) {
+    if (llmPackTimer) clearTimeout(llmPackTimer);
+    llmPackTimer = setTimeout(function () {
+      fetch("/api/llm-pack")
+        .then(function (r) {
+          return r.json();
+        })
+        .then(function (pack) {
+          showPack(pack);
+          if (window.console && console.log) {
+            console.log("[llm-pack]", pack);
+          }
+        })
+        .catch(function (e) {
+          if (window.console && console.error) console.error(e);
+        });
+    }, typeof delayMs === "number" ? delayMs : 600);
   }
 
   window.dashCaptureInteraction = function (args) {
     try {
       var dump = dumpArgs(args);
       var params = flattenParams(args);
-      showDump(dump);
+      lastInteractionDump = dump;
+      ensurePanel();
+      var actionEl = document.getElementById("dash-interaction-action");
+      if (actionEl) actionEl.textContent = dump.action || "(no action)";
       if (window.console && console.log) {
         console.log("[dash interaction]", dump.action, dump);
       }
@@ -209,16 +263,29 @@
           params: params,
           interaction: dump,
         }),
-      }).catch(function () {});
+      })
+        .then(function () {
+          // ждём пересчёт запросов после клика по карте/кнопкам
+          refreshLlmPack(700);
+        })
+        .catch(function () {
+          refreshLlmPack(700);
+        });
     } catch (e) {
       if (window.console && console.error) console.error(e);
     }
   };
 
-  // панель сразу, чтобы было видно что дебаг включён
+  window.dashRefreshLlmPack = refreshLlmPack;
+
+  // панель сразу + первый pack после загрузки дашборда
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", ensurePanel);
+    document.addEventListener("DOMContentLoaded", function () {
+      ensurePanel();
+      refreshLlmPack(1500);
+    });
   } else {
     ensurePanel();
+    refreshLlmPack(1500);
   }
 })();
