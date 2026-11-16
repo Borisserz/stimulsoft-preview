@@ -138,8 +138,13 @@ def build_compare_text(pack: dict[str, Any] | None, *, max_rows: int = 12) -> st
 
     results = dict(pack.get("results") or {})
     lines.append("")
+    src = str(pack.get("results_source") or "")
     lines.append("4) DANNYE (tolko pod filtry — eto i est dlya LLM):")
-    if not dash:
+    if src == "visible":
+        lines.append("   istochnik=VISIBLE tablitsy na ekrane (ne syroy SQL)")
+    else:
+        lines.append("   istochnik=SQL-snyamka (esli ne 10 kak na fronte — filtry/visible ne pojmany)")
+    if not dash and src != "visible":
         lines.append("   !! FILTRY KARTY PUSTYE — nize VSE stroki SQL-snyamka, ne region.")
         lines.append("   !! Poetomu chislo ne menyaetsya ot regiona (chasto 50 = lim snyamka).")
     if not results:

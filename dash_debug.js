@@ -423,7 +423,7 @@
         .catch(function () {});
     };
     document.getElementById("dash-interaction-compare").onclick = function () {
-      refreshCompare(0);
+      postVisibleAndCompare();
     };
     document.getElementById("dash-interaction-json").onclick = function () {
       refreshLlmPack(0);
@@ -549,27 +549,106 @@
     }, typeof delayMs === "number" ? delayMs : 600);
   }
 
+  function cellValue(cell) {
+    if (cell == null) return null;
+    if (typeof cell !== "object") return cell;
+    if (cell.text !== undefined && cell.text !== null) return cell.text;
+    if (cell.value !== undefined && cell.value !== null) return cell.value;
+    if (cell.label !== undefined && cell.label !== null) return cell.label;
+    if (cell.displayValue !== undefined && cell.displayValue !== null)
+      return cell.displayValue;
+    if (cell.caption !== undefined && cell.caption !== null) return cell.caption;
+    return null;
+  }
+
+  function parseGridData(data) {
+    if (!Array.isArray(data) || data.length < 1) return null;
+    var header = data[0];
+    if (!Array.isArray(header)) return null;
+    var hasTotal = false;
+    for (var h = 0; h < header.length; h++) {
+      if (header[h] && header[h].showTotalSummary) hasTotal = true;
+    }
+    var end = hasTotal && data.length > 1 ? data.length - 1 : data.length;
+    var columns = [];
+    for (var c = 0; c < header.length; c++) {
+      var col = header[c] || {};
+      columns.push(
+        col.key || col.label || col.text || col.name || col.column || "c" + c
+      );
+    }
+    var rows = [];
+    for (var r = 1; r < end; r++) {
+      var row = data[r];
+      if (!Array.isArray(row)) continue;
+      var obj = {};
+      for (var i = 0; i < columns.length; i++) {
+        obj[columns[i]] = cellValue(row[i]);
+      }
+      rows.push(obj);
+    }
+    return {
+      columns: columns,
+      rows: rows,
+      row_count: rows.length,
+      source: "visible_grid",
+    };
+  }
+
+  function scrapeVisibleResults() {
+    // Stimulsoft keeps filtered table rows on element.dataGrid.data
+    // (what you see; not the raw SQL snapshot of 50).
+    var out = {};
+    var nodes = document.getElementsByTagName("*");
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      var attrs = el.elementAttributes;
+      if (!attrs || attrs.type !== "StiTableElement") continue;
+      var name = attrs.name || "Table" + i;
+      var gridData =
+        (el.dataGrid && el.dataGrid.data) ||
+        (attrs.contentAttributes && attrs.contentAttributes.data) ||
+        null;
+      var parsed = parseGridData(gridData);
+      if (parsed) out[name] = parsed;
+    }
+    return out;
+  }
+
+  function postVisibleAndCompare() {
+    var visible = scrapeVisibleResults();
+    var body = { visible_results: visible };
+    fetch("/api/params", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      cache: "no-store",
+    })
+      .then(function () {
+        return fetch("/api/compare", { cache: "no-store" });
+      })
+      .then(function (r) {
+        return r.text();
+      })
+      .then(function (text) {
+        showText(text, "SVERKA");
+      })
+      .catch(function () {});
+  }
+
   function refreshAfterInteraction(action) {
-    // After click — show human SVERKA text (not verify log).
-    var delays = [500, 1400, 2600];
+    // Wait for Stimulsoft to repaint filtered table, then scrape visible rows.
+    var delays = [700, 1600, 2800];
     if (
       action === "DashboardElementDrillDown" ||
       action === "DashboardElementDrillUp" ||
-      action === "DashboardDrillDown"
+      action === "DashboardDrillDown" ||
+      action === "DashboardFiltering"
     ) {
-      delays = [400, 1200, 2400, 3600];
+      delays = [600, 1400, 2600, 4000];
     }
     delays.forEach(function (ms) {
-      setTimeout(function () {
-        fetch("/api/compare", { cache: "no-store" })
-          .then(function (r) {
-            return r.text();
-          })
-          .then(function (text) {
-            showText(text, "SVERKA");
-          })
-          .catch(function () {});
-      }, ms);
+      setTimeout(postVisibleAndCompare, ms);
     });
   }
 
@@ -609,10 +688,10 @@
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", function () {
       ensurePanel();
-      refreshCompare(1500);
+      setTimeout(postVisibleAndCompare, 1500);
     });
   } else {
     ensurePanel();
-    refreshCompare(1500);
+    setTimeout(postVisibleAndCompare, 1500);
   }
 })();

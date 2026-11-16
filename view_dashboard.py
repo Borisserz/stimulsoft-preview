@@ -101,8 +101,13 @@ def apply_license(component) -> None:
 load_env()
 
 _mrt = os.environ.get("MRT_PATH", "").strip()
+_argv_mrt = ""
 if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
-    MRT_PATH = path_of(sys.argv[1])
+    # only treat CLI arg as MRT when it looks like a report path (not unittest module)
+    if sys.argv[1].lower().endswith(".mrt"):
+        _argv_mrt = sys.argv[1]
+if _argv_mrt:
+    MRT_PATH = path_of(_argv_mrt)
 elif _mrt:
     MRT_PATH = path_of(_mrt)
 else:
@@ -146,6 +151,8 @@ _INTERACTIONS: list[dict[str, Any]] = []
 _INTERACTIONS_MAX = 50
 # Результаты датасорсов после onEndProcessData (без SQL) — для LLM pack.
 _RESULTS: dict[str, Any] = {}
+# Visible Stimulsoft table grids (already filtered on frontend) — prefer over _RESULTS.
+_VISIBLE_RESULTS: dict[str, Any] = {}
 _FILTERS_UPDATED_AT: str | None = None
 _FILTER_GEN: int = 0
 _APPLIED_LOG: list[dict[str, Any]] = []
@@ -204,7 +211,7 @@ def params_snapshot() -> dict[str, Any]:
 
 
 def params_update(values: dict[str, Any], *, clear_results_on_change: bool = True) -> dict[str, Any]:
-    global _FILTERS_UPDATED_AT, _FILTER_GEN, _DRILL_STACK, _APPLY_FILTERS
+    global _FILTERS_UPDATED_AT, _FILTER_GEN, _DRILL_STACK, _APPLY_FILTERS, _VISIBLE_RESULTS
     with _params_lock:
         real_changed = False
         for key, value in values.items():
@@ -229,6 +236,7 @@ def params_update(values: dict[str, Any], *, clear_results_on_change: bool = Tru
             if clear_results_on_change:
                 # иначе в pack торчат старые rows (типа 2026-01-01) до нового пересчёта
                 _RESULTS.clear()
+                _VISIBLE_RESULTS = {}
                 _PENDING_APPLY.clear()
                 # Year/Month change invalidates map drill / apply-filter state
                 _DRILL_STACK = []
@@ -367,20 +375,32 @@ def results_snapshot() -> dict[str, Any]:
 
 def llm_pack_snapshot() -> dict[str, Any]:
     with _params_lock:
-        return build_llm_pack(
+        # Prefer what the user sees in Stimulsoft tables (already filtered).
+        use_visible = bool(_VISIBLE_RESULTS)
+        results = (
+            {k: dict(v) for k, v in _VISIBLE_RESULTS.items()}
+            if use_visible
+            else {k: dict(v) for k, v in _RESULTS.items()}
+        )
+        pack = build_llm_pack(
             filters=sanitize_filters(_PARAMS),
             interaction=_LAST_INTERACTION,
-            results={k: dict(v) for k, v in _RESULTS.items()},
+            results=results,
+            # visible grids are already filtered by Stimulsoft — do not re-filter
+            apply_dashboard_filters=not use_visible,
             drill_stack=list(_DRILL_STACK),
             apply_filters=list(_APPLY_FILTERS),
             meta={
                 "filters_updated_at": _FILTERS_UPDATED_AT,
-                "sources": list(_RESULTS.keys()),
+                "sources": list(results.keys()),
                 "applied_log_len": len(_APPLIED_LOG),
                 "drill_level": len(_DRILL_STACK),
                 "apply_filter_count": len(_APPLY_FILTERS),
+                "results_source": "visible" if use_visible else "sql_snapshot",
             },
         )
+        pack["results_source"] = "visible" if use_visible else "sql_snapshot"
+        return pack
 
 
 def verify_snapshot() -> dict[str, Any]:
@@ -600,11 +620,21 @@ def get_verify():
 
 @app.post("/api/params")
 def post_params():
+    global _VISIBLE_RESULTS
     incoming = _body_params()
     incoming.update(_public_query_params())
     body = request.get_json(silent=True) if request.is_json else None
     if isinstance(body, dict) and body.get("interaction") is not None:
         remember_interaction(body.get("interaction"))
+    if isinstance(body, dict) and isinstance(body.get("visible_results"), dict):
+        cleaned: dict[str, Any] = {}
+        for name, payload in body["visible_results"].items():
+            if isinstance(payload, dict) and (
+                payload.get("rows") is not None or payload.get("row_count") is not None
+            ):
+                cleaned[str(name)] = dict(payload)
+        with _params_lock:
+            _VISIBLE_RESULTS = cleaned
     # Do NOT clear results on map/button clicks — client-side filter often
     # does not re-query, and wiping made the panel look "empty" after Брест.
     # Year/Month reloads clear via prepare_variables instead.
@@ -621,11 +651,13 @@ def post_params():
 @app.delete("/api/params")
 def clear_params():
     global _LAST_INTERACTION, _FILTERS_UPDATED_AT, _FILTER_GEN, _DRILL_STACK, _APPLY_FILTERS
+    global _VISIBLE_RESULTS
     with _params_lock:
         _PARAMS.clear()
         _LAST_INTERACTION = None
         _INTERACTIONS.clear()
         _RESULTS.clear()
+        _VISIBLE_RESULTS = {}
         _APPLIED_LOG.clear()
         _PENDING_APPLY.clear()
         _DRILL_STACK = []
@@ -633,6 +665,22 @@ def clear_params():
         _FILTERS_UPDATED_AT = None
         _FILTER_GEN += 1
     return jsonify({"ok": True, "params": {}, "llm_pack": llm_pack_snapshot()})
+
+
+@app.post("/api/smoke-seed")
+def smoke_seed():
+    """Local-only: inject fake rows without DB/MRT. Requires ALLOW_SMOKE_SEED=1."""
+    if os.environ.get("ALLOW_SMOKE_SEED", "").lower() not in {"1", "true", "yes"}:
+        return Response("smoke seed disabled", status=404)
+    body = request.get_json(silent=True) if request.is_json else None
+    if not isinstance(body, dict) or not isinstance(body.get("results"), dict):
+        return Response('need JSON {"results":{...}}', status=400)
+    with _params_lock:
+        for name, payload in body["results"].items():
+            if isinstance(payload, dict):
+                _RESULTS[str(name)] = dict(payload)
+    return jsonify({"ok": True, "sources": list(_RESULTS.keys())})
+
 
 @app.route("/mrt", methods=["GET", "POST"])
 def serve_mrt():
