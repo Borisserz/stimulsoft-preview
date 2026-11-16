@@ -67,11 +67,25 @@
 
   function cloneFilterRule(item) {
     if (item == null || typeof item !== "object") return item;
+    var path =
+      item.path != null && item.path !== ""
+        ? item.path
+        : item.columnName || item.column || null;
+    var condition = item.condition != null ? item.condition : "EqualTo";
+    // Region map: MapEqualTo often has path=null — keep value under path "map"
+    if (
+      (path == null || path === "") &&
+      item.value !== undefined &&
+      item.value !== null &&
+      item.value !== ""
+    ) {
+      path = "map";
+    }
     return {
       typeItem: item.typeItem != null ? item.typeItem : "FilterRule",
       key: item.key != null ? item.key : null,
-      path: item.path != null ? item.path : item.columnName || item.column || null,
-      condition: item.condition != null ? item.condition : "EqualTo",
+      path: path,
+      condition: condition,
       value: item.value !== undefined ? item.value : null,
       value2: item.value2 !== undefined ? item.value2 : null,
       path2: item.path2 != null ? item.path2 : null,

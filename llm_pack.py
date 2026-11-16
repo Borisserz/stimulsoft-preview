@@ -110,7 +110,8 @@ def build_compare_text(pack: dict[str, Any] | None, *, max_rows: int = 12) -> st
                 f"  ({rule.get('condition') or 'equalTo'})"
             )
     else:
-        lines.append("   (net — pokazany vse SQL-stroki bez region-filtra)")
+        lines.append("   (net — esli uzhe provalilsya v oblast, zhmi SVERKA snova)")
+        lines.append("   (esli vse eshche net — smotri action v p.3)")
 
     inter = dict(pack.get("interaction") or {})
     lines.append("")
@@ -213,6 +214,7 @@ def _rules_from_filter_list(raw: Any) -> list[dict[str, Any]]:
     for item in raw:
         if not isinstance(item, dict):
             continue
+        condition = str(item.get("condition") or "EqualTo")
         # Prefer real column path; never fall back to GUID key
         path = (
             item.get("path")
@@ -223,19 +225,23 @@ def _rules_from_filter_list(raw: Any) -> list[dict[str, Any]]:
         if path is None or path == "":
             key = item.get("key")
             path = key if _looks_like_column_path(key) else None
-        if path is None or path == "" or not _looks_like_column_path(path):
-            continue
         if "value" not in item and "values" not in item:
             continue
         value = item.get("value") if "value" in item else item.get("values")
         # Skip empty filter values — they match everything / nothing useful
         if value is None or value == "":
             continue
+        # Region map: Stimulsoft sends MapEqualTo with path=null, value="Брестская"
+        if path is None or path == "" or not _looks_like_column_path(path):
+            if condition in {"MapEqualTo", "EqualTo", "equalTo", "PairEqualTo"}:
+                path = "map"
+            else:
+                continue
         rules.append(
             {
                 "path": str(path),
                 "value": value,
-                "condition": str(item.get("condition") or "EqualTo"),
+                "condition": condition,
             }
         )
     return rules
@@ -256,7 +262,10 @@ def _bags_with_filters(interaction: dict[str, Any]) -> list[dict[str, Any]]:
             # DashboardDrillDown / report DrillDown: list of param objects
             for item in bag:
                 if isinstance(item, dict) and (
-                    "filters" in item or "path" in item or "value" in item
+                    "filters" in item
+                    or "path" in item
+                    or "value" in item
+                    or "parameters" in item
                 ):
                     bags.append(item)
     return bags
@@ -270,20 +279,50 @@ def extract_dashboard_filter_rules(
         return []
     rules: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
+
+    def _add(rule: dict[str, Any]) -> None:
+        key = (rule["path"], _norm(rule.get("value")))
+        if key in seen:
+            return
+        seen.add(key)
+        rules.append(rule)
+
     for bag in _bags_with_filters(interaction):
         for rule in _rules_from_filter_list(bag.get("filters")):
-            key = (rule["path"], _norm(rule.get("value")))
-            if key in seen:
+            _add(rule)
+        # DashboardDrillDown: { value: "Брестская", parameters: [{key,value}] }
+        if bag.get("value") not in (None, "") and not bag.get("filters"):
+            _add(
+                {
+                    "path": "map",
+                    "value": bag.get("value"),
+                    "condition": "MapEqualTo",
+                }
+            )
+        for param in bag.get("parameters") or []:
+            if not isinstance(param, dict):
                 continue
-            seen.add(key)
-            rules.append(rule)
+            pval = param.get("value")
+            if pval is None or pval == "":
+                continue
+            ppath = (
+                param.get("key")
+                or param.get("name")
+                or param.get("path")
+                or "map"
+            )
+            if not _looks_like_column_path(ppath):
+                ppath = "map"
+            _add(
+                {
+                    "path": str(ppath),
+                    "value": pval,
+                    "condition": "EqualTo",
+                }
+            )
         # single rule shaped object
         for rule in _rules_from_filter_list([bag]):
-            key = (rule["path"], _norm(rule.get("value")))
-            if key in seen:
-                continue
-            seen.add(key)
-            rules.append(rule)
+            _add(rule)
     return rules
 
 
@@ -347,17 +386,27 @@ def update_filter_state(
     rules = extract_dashboard_filter_rules(interaction)
 
     if action == "DashboardFiltering":
-        # Merge by path: second element click must not wipe the first filter
+        # Merge by path: second element click must not wipe the first filter.
+        # Empty list = user cleared map selection.
         if not rules:
-            # empty filter list from Stimulsoft ≈ clear apply-filters
-            apply_filters = []
+            apply_filters = [r for r in apply_filters if str(r.get("path")) != "map"]
         else:
             by_path = {str(r.get("path")): r for r in apply_filters}
-            for rule in rules:
+            # multiple MapEqualTo values (Брест + Пинск) — keep all map values
+            map_rules = [r for r in rules if str(r.get("path")) == "map"]
+            other = [r for r in rules if str(r.get("path")) != "map"]
+            for rule in other:
                 by_path[str(rule.get("path"))] = rule
-            apply_filters = list(by_path.values())
+            non_map = [r for r in by_path.values() if str(r.get("path")) != "map"]
+            if map_rules:
+                apply_filters = non_map + map_rules
+            else:
+                apply_filters = list(by_path.values())
     elif action == "DashboardElementDrillDown" and rules:
         drill_stack.append(rules)
+    elif action == "DashboardElementDrillDown" and not rules:
+        # click without parseable filters — keep stack, do not wipe
+        pass
     elif action == "DashboardElementDrillUp":
         if drill_stack:
             drill_stack.pop()
@@ -395,22 +444,51 @@ def _column_tail(name: Any) -> str:
     return text.strip().lower()
 
 
+_MAP_NAME_HINTS = (
+    "region",
+    "obl",
+    "oblast",
+    "name",
+    "city",
+    "town",
+    "raion",
+    "район",
+    "область",
+    "наим",
+    "imns",
+    "map",
+    "ident",
+    "key",
+)
+
+
+def _row_matches_map_value(row: dict[str, Any], want: str) -> bool:
+    """Match selected map region/city name against likely name columns, then any cell."""
+    for key, cell in row.items():
+        kl = str(key).lower()
+        if any(h in kl for h in _MAP_NAME_HINTS):
+            if _norm(cell) == want:
+                return True
+    return any(_norm(cell) == want for cell in row.values())
+
+
 def _row_matches_rule(row: dict[str, Any], rule: dict[str, Any]) -> bool:
-    """Strict: only match the filter path against a real column — never any-cell."""
+    """Match filter path→column; MapEqualTo / path=map matches region/city by value."""
     want = _norm(rule.get("value"))
     path = str(rule.get("path") or "")
     tail = _column_tail(path)
     condition = str(rule.get("condition") or "EqualTo")
+    if condition == "MapEqualTo" or path.lower() == "map":
+        return _row_matches_map_value(row, want)
     for key, cell in row.items():
         key_s = str(key)
         if key_s.lower() != path.lower() and _column_tail(key_s) != tail:
             continue
         got = _norm(cell)
-        if condition in {"equalTo", "EqualTo", "="}:
+        if condition in {"equalTo", "EqualTo", "=", "PairEqualTo"}:
             return got == want
         if condition in {"notEqualTo", "NotEqualTo", "<>"}:
             return got != want
-        # unknown condition → equalTo
         return got == want
     return False
 
@@ -420,6 +498,12 @@ def _source_has_rule_columns(
 ) -> bool:
     if not dict_rows or not rules:
         return False
+    # map selection applies to any source that contains the selected name
+    if any(
+        str(r.get("condition")) == "MapEqualTo" or str(r.get("path") or "").lower() == "map"
+        for r in rules
+    ):
+        return True
     paths = {_column_tail(r.get("path")) for r in rules}
     paths |= {str(r.get("path") or "").lower() for r in rules}
     for row in dict_rows:

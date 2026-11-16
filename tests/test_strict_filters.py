@@ -11,6 +11,59 @@ from llm_pack import (
 )
 
 
+class MapFilterCaptureTests(unittest.TestCase):
+    def test_map_equal_to_without_path_is_kept(self):
+        from llm_pack import extract_dashboard_filter_rules, apply_rules_to_results
+
+        interaction = {
+            "action": "DashboardElementDrillDown",
+            "drillDownParameters": {
+                "elementName": "Map1",
+                "filters": [
+                    {"condition": "MapEqualTo", "value": "Брестская", "path": None},
+                    {"condition": "MapEqualTo", "value": "Пинск", "path": None},
+                ],
+            },
+        }
+        rules = extract_dashboard_filter_rules(interaction)
+        self.assertEqual(len(rules), 2)
+        self.assertEqual(rules[0]["value"], "Брестская")
+        self.assertEqual(rules[1]["value"], "Пинск")
+
+        filtered = apply_rules_to_results(
+            {
+                "detail": {
+                    "columns": ["region", "city", "amount"],
+                    "row_count": 3,
+                    "rows": [
+                        {"region": "Брестская", "city": "Пинск", "amount": "10"},
+                        {"region": "Брестская", "city": "Барановичи", "amount": "5"},
+                        {"region": "Минская", "city": "Минск", "amount": "20"},
+                    ],
+                }
+            },
+            rules,
+        )
+        self.assertEqual(filtered["detail"]["row_count"], 1)
+        self.assertEqual(filtered["detail"]["rows"][0]["city"], "Пинск")
+
+    def test_dashboard_drill_down_value_object(self):
+        from llm_pack import extract_dashboard_filter_rules
+
+        rules = extract_dashboard_filter_rules(
+            {
+                "action": "DashboardDrillDown",
+                "drillDownParameters": {
+                    "value": "Брестская",
+                    "parameters": [{"key": "city", "value": "Пинск"}],
+                },
+            }
+        )
+        values = {r["value"] for r in rules}
+        self.assertIn("Брестская", values)
+        self.assertIn("Пинск", values)
+
+
 class StrictMatchTests(unittest.TestCase):
     def test_no_any_cell_fallback_keeps_unrelated_out(self):
         # value "1" appears in amount — must NOT keep row via any-cell match
