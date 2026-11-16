@@ -119,18 +119,150 @@ def snapshot_from_data_args(args: Any) -> tuple[str, dict[str, Any] | None]:
     }
 
 
+def enrich_interaction(interaction: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Normalize button / map interaction for the LLM pack."""
+    if not interaction or not isinstance(interaction, dict):
+        return interaction
+    out = dict(interaction)
+    fp = out.get("filteringParameters")
+    if isinstance(fp, dict):
+        name = fp.get("elementName")
+        if name is not None:
+            out["element"] = str(name)
+        if "isChecked" in fp:
+            out["button_checked"] = bool(fp.get("isChecked"))
+        action = str(out.get("action") or "")
+        if "Button" in action or (
+            name is not None and str(name).startswith("Button")
+        ):
+            out["button"] = str(name)
+    rules = extract_dashboard_filter_rules(out)
+    if rules:
+        out["dashboard_filters"] = rules
+    return out
+
+
+def extract_dashboard_filter_rules(
+    interaction: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Pull FilterRule path/value from Stimulsoft filteringParameters."""
+    if not interaction or not isinstance(interaction, dict):
+        return []
+    fp = interaction.get("filteringParameters") or {}
+    if not isinstance(fp, dict):
+        return []
+    raw = fp.get("filters") or []
+    if not isinstance(raw, list):
+        return []
+    rules: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        path = item.get("path") or item.get("key") or item.get("column") or item.get(
+            "columnName"
+        )
+        if path is None or path == "":
+            continue
+        if "value" not in item and "values" not in item:
+            continue
+        value = item.get("value") if "value" in item else item.get("values")
+        rules.append(
+            {
+                "path": str(path),
+                "value": value,
+                "condition": str(item.get("condition") or "EqualTo"),
+            }
+        )
+    return rules
+
+
+def _column_tail(name: Any) -> str:
+    text = str(name or "")
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    return text.strip().lower()
+
+
+def _row_matches_rule(row: dict[str, Any], rule: dict[str, Any]) -> bool:
+    want = _norm(rule.get("value"))
+    path = str(rule.get("path") or "")
+    tail = _column_tail(path)
+    matched_col = False
+    for key, cell in row.items():
+        key_s = str(key)
+        if key_s.lower() == path.lower() or _column_tail(key_s) == tail:
+            matched_col = True
+            if _norm(cell) == want:
+                return True
+    if matched_col:
+        return False
+    # no matching column name — keep row only if any cell equals the filter value
+    # (helps when path is internal meter id but region name is in another column)
+    return any(_norm(cell) == want for cell in row.values())
+
+
+def apply_rules_to_results(
+    results: dict[str, Any] | None,
+    rules: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Filter captured SQL rows to the active map/table dashboard filters."""
+    results = {k: dict(v or {}) for k, v in dict(results or {}).items()}
+    rules = list(rules or [])
+    if not rules:
+        return results
+    out: dict[str, Any] = {}
+    for name, payload in results.items():
+        rows = list(payload.get("rows") or [])
+        dict_rows = [r for r in rows if isinstance(r, dict)]
+        if not dict_rows:
+            out[name] = payload
+            continue
+        # If none of the columns relate to any rule path and no cell equals
+        # values, leave source as-is (KPI without region column).
+        paths = {_column_tail(r.get("path")) for r in rules}
+        has_path_col = any(_column_tail(k) in paths for r in dict_rows for k in r.keys())
+        has_value_hit = any(
+            any(_norm(cell) == _norm(rule.get("value")) for cell in r.values())
+            for r in dict_rows
+            for rule in rules
+        )
+        if not has_path_col and not has_value_hit:
+            out[name] = payload
+            continue
+        kept = [r for r in rows if isinstance(r, dict) and all(
+            _row_matches_rule(r, rule) for rule in rules
+        )]
+        new_payload = dict(payload)
+        new_payload["rows"] = kept
+        new_payload["row_count"] = len(kept)
+        new_payload["filtered_by"] = rules
+        out[name] = new_payload
+    return out
+
+
 def build_llm_pack(
     *,
     filters: dict[str, Any] | None,
     interaction: dict[str, Any] | None,
     results: dict[str, Any] | None,
     meta: dict[str, Any] | None = None,
+    apply_dashboard_filters: bool = True,
 ) -> dict[str, Any]:
+    interaction = enrich_interaction(interaction)
+    rules = extract_dashboard_filter_rules(interaction)
+    raw_results = dict(results or {})
+    view_results = (
+        apply_rules_to_results(raw_results, rules)
+        if apply_dashboard_filters and rules
+        else raw_results
+    )
     pack: dict[str, Any] = {
         "filters": dict(filters or {}),
         "interaction": interaction,
-        "results": dict(results or {}),
+        "results": view_results,
     }
+    if rules:
+        pack["dashboard_filters"] = rules
     if meta is not None:
         pack["meta"] = dict(meta)
     return json_safe(pack)

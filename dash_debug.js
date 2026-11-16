@@ -13,6 +13,7 @@
     "DashboardResetAllFilters",
     "DashboardElementDrillDown",
     "DashboardElementDrillUp",
+    "DashboardButtonElementApplyEvents",
   ];
 
   var PARAM_BAGS = [
@@ -39,6 +40,89 @@
     }
   }
 
+  function collectionLength(list) {
+    if (list == null) return 0;
+    if (typeof list.length === "number") return list.length;
+    if (typeof list.Count === "number") return list.Count;
+    if (typeof list.count === "number") return list.count;
+    return 0;
+  }
+
+  function collectionItem(list, index) {
+    if (list == null) return null;
+    if (typeof list.get === "function") {
+      try {
+        return list.get(index);
+      } catch (e) {}
+    }
+    if (typeof list.getByIndex === "function") {
+      try {
+        return list.getByIndex(index);
+      } catch (e2) {}
+    }
+    return list[index];
+  }
+
+  function cloneFilterRule(item) {
+    if (item == null || typeof item !== "object") return item;
+    return {
+      typeItem: item.typeItem != null ? item.typeItem : "FilterRule",
+      key: item.key != null ? item.key : null,
+      path: item.path != null ? item.path : item.columnName || item.column || null,
+      condition: item.condition != null ? item.condition : "EqualTo",
+      value: item.value !== undefined ? item.value : null,
+      value2: item.value2 !== undefined ? item.value2 : null,
+      path2: item.path2 != null ? item.path2 : null,
+      isEnabled: item.isEnabled !== undefined ? item.isEnabled : true,
+    };
+  }
+
+  function cloneFilteringParameters(fp) {
+    // Stimulsoft often passes .NET-like dicts; JSON.stringify drops useful fields.
+    if (fp == null) return null;
+    if (typeof fp !== "object") return fp;
+    var out = {};
+    var keys = [
+      "elementName",
+      "elementGroup",
+      "filterGuid",
+      "isChecked",
+      "columnIndex",
+      "filters",
+      "filterParameters",
+    ];
+    keys.forEach(function (k) {
+      if (fp[k] !== undefined) {
+        if (k === "filters") {
+          var list = fp[k];
+          var arr = [];
+          var n = collectionLength(list);
+          if (n > 0) {
+            for (var i = 0; i < n; i++) {
+              arr.push(cloneFilterRule(collectionItem(list, i)));
+            }
+          } else if (Array.isArray(list)) {
+            list.forEach(function (it) {
+              arr.push(cloneFilterRule(it));
+            });
+          }
+          out.filters = arr;
+        } else if (k === "filterParameters") {
+          out[k] = cloneFilteringParameters(fp[k]) || safeClone(fp[k]);
+        } else {
+          out[k] = fp[k];
+        }
+      }
+    });
+    // also copy any plain enumerable extras
+    try {
+      Object.keys(fp).forEach(function (k) {
+        if (!(k in out)) out[k] = safeClone(fp[k]);
+      });
+    } catch (e) {}
+    return out;
+  }
+
   function dumpArgs(args) {
     var out = { __keys: [], __knownActions: ACTIONS };
     if (!args || typeof args !== "object") {
@@ -58,6 +142,10 @@
         out[k] = "[StiReport]";
         continue;
       }
+      if (k === "filteringParameters") {
+        out[k] = cloneFilteringParameters(args[k]);
+        continue;
+      }
       out[k] = safeClone(args[k]);
     }
     [
@@ -74,10 +162,32 @@
       "data",
     ].forEach(function (k) {
       if (!(k in out) && args[k] !== undefined) {
-        out[k] = k === "report" ? "[StiReport]" : safeClone(args[k]);
+        if (k === "report") out[k] = "[StiReport]";
+        else if (k === "filteringParameters")
+          out[k] = cloneFilteringParameters(args[k]);
+        else out[k] = safeClone(args[k]);
         out.__keys.push(k);
       }
     });
+    // normalize button identity for pack consumers
+    var fp = out.filteringParameters || {};
+    if (fp.elementName) out.element = fp.elementName;
+    if (fp.isChecked !== undefined) out.button_checked = !!fp.isChecked;
+    if (
+      out.action === "DashboardButtonElementApplyEvents" ||
+      (fp.elementName && String(fp.elementName).indexOf("Button") === 0)
+    ) {
+      out.button = fp.elementName;
+    }
+    if (fp.filters && fp.filters.length) {
+      out.dashboard_filters = fp.filters.map(function (f) {
+        return {
+          path: f.path,
+          value: f.value,
+          condition: f.condition || "EqualTo",
+        };
+      });
+    }
     return out;
   }
 
@@ -86,7 +196,8 @@
     var s = String(name);
     if (s.indexOf("__") === 0) return false;
     if (/^\d+$/.test(s)) return false;
-    return /^[A-Za-z_]/.test(s);
+    // Latin OR Cyrillic column names (region / область / etc.)
+    return /^[A-Za-z_\u0400-\u04FF]/.test(s);
   }
 
   function flattenParams(args) {
@@ -138,28 +249,38 @@
         src.columnName ||
         src.column ||
         src.path ||
-        src.key ||
         src.field ||
         src.dataColumn;
+      // FilterRule.key is often an internal id — prefer path for region name match
       if (col != null && isRealFilterKey(col)) {
         if ("value" in src) put(col, src.value);
         else if ("values" in src) put(col, src.values);
         else if ("text" in src && typeof src.text !== "object") put(col, src.text);
       }
-      Object.keys(src).forEach(function (k) {
-        if (k === "report") return;
-        var v = src[k];
-        if (v && typeof v === "object") walkDashboardFilters(v, depth + 1);
-      });
+      var n = collectionLength(src);
+      if (n > 0 && (src.filters === undefined || depth > 0)) {
+        for (var i = 0; i < n; i++) {
+          walkDashboardFilters(collectionItem(src, i), depth + 1);
+        }
+      }
+      try {
+        Object.keys(src).forEach(function (k) {
+          if (k === "report" || k === "elementName" || k === "isChecked") return;
+          var v = src[k];
+          if (v && typeof v === "object") walkDashboardFilters(v, depth + 1);
+        });
+      } catch (e) {}
     }
     PARAM_BAGS.forEach(function (bag) {
       walk(args[bag]);
     });
     // also top-level variables map if present
     if (args && args.variables) walk(args.variables);
-    // map region / table filters live in nested filteringParameters
+    // map region / table filters: { filters: [ {path, value} ] }
     if (args && args.filteringParameters) {
-      walkDashboardFilters(args.filteringParameters, 0);
+      var fp = args.filteringParameters;
+      walkDashboardFilters(fp, 0);
+      if (fp.filters) walkDashboardFilters(fp.filters, 0);
     }
     return params;
   }
@@ -371,13 +492,31 @@
     }, typeof delayMs === "number" ? delayMs : 0);
   }
 
+  function refreshAfterInteraction(action) {
+    // Map filter is client-side — pack filters rows immediately.
+    // Buttons often re-query SQL after CheckedChanged — poll a few times.
+    var delays =
+      action === "DashboardButtonElementApplyEvents"
+        ? [600, 1400, 2600]
+        : action === "DashboardFiltering"
+          ? [400, 1200, 2200]
+          : [800, 1800];
+    delays.forEach(function (ms) {
+      refreshLlmPack(ms);
+    });
+  }
+
   window.dashCaptureInteraction = function (args) {
     try {
       var dump = dumpArgs(args);
-      var params = flattenParams(args);
+      // flatten from the cloned dump so FilterRule path/value survive
+      var params = flattenParams(dump);
       ensurePanel();
       var actionEl = document.getElementById("dash-interaction-action");
-      if (actionEl) actionEl.textContent = dump.action || "(no action)";
+      if (actionEl) {
+        actionEl.textContent =
+          dump.button || dump.action || dump.element || "(no action)";
+      }
       if (window.console && console.log) {
         console.log("[dash interaction]", dump.action, dump);
       }
@@ -388,10 +527,10 @@
         cache: "no-store",
       })
         .then(function () {
-          refreshLlmPack(800);
+          refreshAfterInteraction(dump.action);
         })
         .catch(function () {
-          refreshLlmPack(800);
+          refreshAfterInteraction(dump.action);
         });
     } catch (e) {
       if (window.console && console.error) console.error(e);

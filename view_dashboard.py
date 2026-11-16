@@ -52,6 +52,7 @@ from llm_pack import (
     build_results_digest,
     build_verify_report,
     dumps_llm_pack,
+    enrich_interaction,
     is_real_filter_key,
     sanitize_filters,
     snapshot_from_data_args,
@@ -471,6 +472,7 @@ def remember_interaction(dump: Any) -> None:
     global _LAST_INTERACTION
     if not isinstance(dump, dict):
         dump = {"raw": dump}
+    dump = enrich_interaction(dump) or dump
     with _params_lock:
         _LAST_INTERACTION = dump
         _INTERACTIONS.append(dump)
@@ -478,8 +480,13 @@ def remember_interaction(dump: Any) -> None:
         if overflow > 0:
             del _INTERACTIONS[:overflow]
     action = dump.get("action")
-    keys = dump.get("__keys")
-    print(f"[interaction] action={action!r} keys={keys}", flush=True)
+    button = dump.get("button")
+    rules = dump.get("dashboard_filters") or []
+    print(
+        f"[interaction] action={action!r} button={button!r} "
+        f"filters={len(rules)} keys={dump.get('__keys')}",
+        flush=True,
+    )
 
 
 def wire_viewer(viewer: StiViewer) -> None:
