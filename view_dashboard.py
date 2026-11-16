@@ -497,7 +497,8 @@ def main() -> None:
             webbrowser.open(f"http://{HOST}:{PORT}/viewer")
         except Exception:
             pass
-    app.run(host=HOST, port=PORT, debug=False)
+    # load_dotenv=False: .env/local уже читаем сами; иначе Flask орёт про python-dotenv
+    app.run(host=HOST, port=PORT, debug=False, load_dotenv=False)
 
 
 if __name__ == "__main__":
