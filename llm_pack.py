@@ -277,8 +277,15 @@ def update_filter_state(
     rules = extract_dashboard_filter_rules(interaction)
 
     if action == "DashboardFiltering":
-        # Replace apply-filter set for the clicked element (map/table/list/…)
-        apply_filters = rules
+        # Merge by path: second element click must not wipe the first filter
+        if not rules:
+            # empty filter list from Stimulsoft ≈ clear apply-filters
+            apply_filters = []
+        else:
+            by_path = {str(r.get("path")): r for r in apply_filters}
+            for rule in rules:
+                by_path[str(rule.get("path"))] = rule
+            apply_filters = list(by_path.values())
     elif action == "DashboardElementDrillDown" and rules:
         drill_stack.append(rules)
     elif action == "DashboardElementDrillUp":
@@ -368,6 +375,17 @@ def _lean_result_payload(
     }
 
 
+def _applicable_rules_for_source(
+    dict_rows: list[dict[str, Any]], rules: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Only rules whose path exists as a column on this source.
+
+    After drill (region + imns), a map source with only `region` must still
+    filter by region — not be wiped because it lacks `imns`.
+    """
+    return [rule for rule in rules if _source_has_rule_columns(dict_rows, [rule])]
+
+
 def apply_rules_to_results(
     results: dict[str, Any] | None,
     rules: list[dict[str, Any]] | None,
@@ -375,9 +393,9 @@ def apply_rules_to_results(
     """Keep ONLY real rows matching active filters — nothing else.
 
     - Strict column path match (no 'any cell equals value').
-    - Sources without matching columns → dropped from pack.
+    - Per source: apply only rules that have a matching column.
+    - Sources with no applicable rules → dropped (not leaked unfiltered).
     - Sources with zero matching rows → dropped.
-    - No unfiltered KPI passthrough (those totals are wrong under a region filter).
     """
     results = {k: dict(v or {}) for k, v in dict(results or {}).items()}
     rules = list(rules or [])
@@ -396,16 +414,18 @@ def apply_rules_to_results(
         dict_rows = [r for r in rows if isinstance(r, dict)]
         if not dict_rows:
             continue
-        if not _source_has_rule_columns(dict_rows, rules):
+        applicable = _applicable_rules_for_source(dict_rows, rules)
+        if not applicable:
             continue
         kept = [
             r
             for r in rows
-            if isinstance(r, dict) and all(_row_matches_rule(r, rule) for rule in rules)
+            if isinstance(r, dict)
+            and all(_row_matches_rule(r, rule) for rule in applicable)
         ]
         if not kept:
             continue
-        out[name] = _lean_result_payload(payload, rows=kept, rules=rules)
+        out[name] = _lean_result_payload(payload, rows=kept, rules=applicable)
     return out
 
 

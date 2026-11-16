@@ -65,6 +65,61 @@ class StrictMatchTests(unittest.TestCase):
         self.assertEqual(filtered["T"]["row_count"], 1)
         self.assertEqual(filtered["T"]["rows"][0]["region"], "Брестская")
 
+    def test_applies_only_rules_that_exist_on_source(self):
+        # After drill: region + imns. Map source has only region — must still keep Brest rows.
+        results = {
+            "map": {
+                "columns": ["region", "value"],
+                "row_count": 2,
+                "rows": [
+                    {"region": "Брестская", "value": "10"},
+                    {"region": "Минская", "value": "20"},
+                ],
+            },
+            "detail": {
+                "columns": ["region", "imns", "amount"],
+                "row_count": 3,
+                "rows": [
+                    {"region": "Брестская", "imns": "A", "amount": "1"},
+                    {"region": "Брестская", "imns": "B", "amount": "2"},
+                    {"region": "Минская", "imns": "A", "amount": "3"},
+                ],
+            },
+        }
+        rules = [
+            {"path": "region", "value": "Брестская", "condition": "EqualTo"},
+            {"path": "imns", "value": "A", "condition": "EqualTo"},
+        ]
+        filtered = apply_rules_to_results(results, rules)
+        self.assertEqual(filtered["map"]["row_count"], 1)
+        self.assertEqual(filtered["map"]["rows"][0]["region"], "Брестская")
+        self.assertEqual(filtered["detail"]["row_count"], 1)
+        self.assertEqual(filtered["detail"]["rows"][0]["imns"], "A")
+
+    def test_merge_apply_filters_by_path(self):
+        apply_f, stack, combined = update_filter_state(
+            [],
+            [],
+            {
+                "action": "DashboardFiltering",
+                "filteringParameters": {
+                    "filters": [{"path": "region", "value": "Брестская"}],
+                },
+            },
+        )
+        apply_f, stack, combined = update_filter_state(
+            apply_f,
+            stack,
+            {
+                "action": "DashboardFiltering",
+                "filteringParameters": {
+                    "filters": [{"path": "typenum", "value": "1000000"}],
+                },
+            },
+        )
+        paths = {r["path"] for r in combined}
+        self.assertEqual(paths, {"region", "typenum"})
+
 
 class FilterStateTests(unittest.TestCase):
     def test_apply_filter_and_drill_combine(self):

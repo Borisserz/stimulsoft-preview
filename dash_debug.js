@@ -557,6 +557,8 @@
   function refreshAfterInteraction(action) {
     // Map filter / element drill-in are mostly client-side — poll for pack.
     // Buttons / dashboard drill-down often re-query SQL.
+    // IMPORTANT: do NOT call refreshLlmPack in a loop — it clears the timer
+    // and only the last delay would fire.
     var delays = [500, 1200, 2400];
     if (action === "DashboardButtonElementApplyEvents") {
       delays = [600, 1400, 2600];
@@ -571,7 +573,12 @@
       delays = [400, 1200, 2200];
     }
     delays.forEach(function (ms) {
-      refreshLlmPack(ms);
+      setTimeout(function () {
+        fetchJson("/api/llm-pack", function (pack) {
+          showPack(pack, "pack");
+          if (window.console && console.log) console.log("[llm-pack]", pack);
+        });
+      }, ms);
     });
   }
 
