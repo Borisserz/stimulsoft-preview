@@ -232,9 +232,22 @@
     llmPackTimer = setTimeout(function () {
       fetch("/api/llm-pack")
         .then(function (r) {
-          return r.json();
+          return r.text().then(function (text) {
+            return { ok: r.ok, status: r.status, text: text };
+          });
         })
-        .then(function (pack) {
+        .then(function (res) {
+          var pack;
+          try {
+            pack = JSON.parse(res.text);
+          } catch (e) {
+            showPack({
+              error: "llm-pack is not JSON",
+              http_status: res.status,
+              body_preview: String(res.text || "").slice(0, 500),
+            });
+            return;
+          }
           showPack(pack);
           if (window.console && console.log) {
             console.log("[llm-pack]", pack);
@@ -242,6 +255,7 @@
         })
         .catch(function (e) {
           if (window.console && console.error) console.error(e);
+          showPack({ error: String(e) });
         });
     }, typeof delayMs === "number" ? delayMs : 600);
   }

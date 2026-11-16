@@ -47,7 +47,7 @@ from stimulsoft_reports.report.dictionary.StiVariable import StiVariable
 from stimulsoft_reports.report.enums.StiVariableType import StiVariableType
 from stimulsoft_reports.viewer import StiViewer
 
-from llm_pack import build_llm_pack, snapshot_from_data_args
+from llm_pack import build_llm_pack, dumps_llm_pack, snapshot_from_data_args
 
 ROOT = Path(__file__).resolve().parent
 
@@ -404,7 +404,8 @@ def get_interactions():
 @app.get("/api/llm-pack")
 def get_llm_pack():
     """filters + interaction + results всех датасорсов — без SQL/логики MRT."""
-    return jsonify(llm_pack_snapshot())
+    body = dumps_llm_pack(llm_pack_snapshot())
+    return Response(body, mimetype="application/json; charset=utf-8")
 
 
 @app.post("/api/params")

@@ -74,5 +74,38 @@ class BuildLlmPackTests(unittest.TestCase):
         self.assertEqual(set(pack.keys()), {"filters", "interaction", "results"})
 
 
+class JsonSafeTests(unittest.TestCase):
+    def test_roundtrips_pg_types(self):
+        from datetime import date, datetime
+        from decimal import Decimal
+        from uuid import UUID
+
+        from llm_pack import json_safe, dumps_llm_pack
+
+        raw = {
+            "filters": {"d": date(2025, 1, 2)},
+            "interaction": None,
+            "results": {
+                "T": {
+                    "columns": ["n", "t", "u", "b"],
+                    "row_count": 1,
+                    "rows": [
+                        {
+                            "n": Decimal("12.50"),
+                            "t": datetime(2025, 1, 2, 3, 4, 5),
+                            "u": UUID("12345678-1234-5678-1234-567812345678"),
+                            "b": b"hi",
+                        }
+                    ],
+                }
+            },
+        }
+        safe = json_safe(raw)
+        text = dumps_llm_pack(safe)
+        self.assertIn("12.50", text)
+        self.assertIn("2025-01-02", text)
+        self.assertNotIn("Unexpected", text)
+
+
 if __name__ == "__main__":
     unittest.main()
