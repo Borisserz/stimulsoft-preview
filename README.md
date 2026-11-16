@@ -29,6 +29,7 @@ notepad .env
 - http://127.0.0.1:8040/viewer  
 - http://127.0.0.1:8040/api/params  
 - http://127.0.0.1:8040/api/llm-pack — `{filters, interaction, results}` для LLM (без SQL)
+- http://127.0.0.1:8040/api/verify — сверка filters vs params, ушедших в запросы, vs свежесть results
 
 Debug-панель **llm-pack** (правый нижний угол) есть на `/viewer` и на `/designer`.
 После клика по карте/кнопкам/фильтрам показывает JSON. Если не видно — hard refresh (Ctrl+F5) и проверь что открыт именно этот порт после `git pull`.

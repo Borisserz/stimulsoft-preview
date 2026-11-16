@@ -163,6 +163,7 @@
       '<span id="dash-interaction-meta" style="color:#94a3b8"></span>' +
       '<span style="margin-left:auto;color:#94a3b8">filters + results</span>' +
       '<button type="button" id="dash-interaction-refresh" style="background:#1f2937;color:#e2e8f0;border:1px solid #475569;padding:2px 8px;cursor:pointer">refresh</button>' +
+      '<button type="button" id="dash-interaction-verify" style="background:#1f2937;color:#e2e8f0;border:1px solid #475569;padding:2px 8px;cursor:pointer">verify</button>' +
       '<button type="button" id="dash-interaction-clear" style="background:#1f2937;color:#e2e8f0;border:1px solid #475569;padding:2px 8px;cursor:pointer">clear</button>' +
       '<button type="button" id="dash-interaction-hide" style="background:#1f2937;color:#e2e8f0;border:1px solid #475569;padding:2px 8px;cursor:pointer">hide</button>';
     var pre = document.createElement("pre");
@@ -171,8 +172,9 @@
       "margin:0;padding:10px;overflow:auto;flex:1;white-space:pre-wrap;word-break:break-word;color:#bbf7d0;";
     pre.textContent =
       "Click map / top buttons / filters.\n" +
-      "This panel shows JSON for LLM: { filters, interaction, results }\n" +
-      "Check header: sources=N rows=M";
+      "Panel: llm-pack JSON.\n" +
+      "Press verify: filters vs applied query params vs freshness.\n" +
+      "Header sources/rows must change after Year/Month change.";
     el.appendChild(head);
     el.appendChild(pre);
     (document.documentElement || document.body).appendChild(el);
@@ -189,6 +191,9 @@
     };
     document.getElementById("dash-interaction-refresh").onclick = function () {
       refreshLlmPack(0);
+    };
+    document.getElementById("dash-interaction-verify").onclick = function () {
+      refreshVerify(0);
     };
     return el;
   }
@@ -227,36 +232,54 @@
     window.__llmPack = pack;
   }
 
+  function fetchJson(url, onOk) {
+    fetch(url, { cache: "no-store" })
+      .then(function (r) {
+        return r.text().then(function (text) {
+          return { ok: r.ok, status: r.status, text: text };
+        });
+      })
+      .then(function (res) {
+        var pack;
+        try {
+          pack = JSON.parse(res.text);
+        } catch (e) {
+          showPack({
+            error: url + " is not JSON",
+            http_status: res.status,
+            parse_error: String(e && e.message ? e.message : e),
+            body_preview: String(res.text || "").slice(0, 400),
+          });
+          return;
+        }
+        onOk(pack);
+      })
+      .catch(function (e) {
+        if (window.console && console.error) console.error(e);
+        showPack({ error: String(e) });
+      });
+  }
+
   function refreshLlmPack(delayMs) {
     if (llmPackTimer) clearTimeout(llmPackTimer);
     llmPackTimer = setTimeout(function () {
-      fetch("/api/llm-pack", { cache: "no-store" })
-        .then(function (r) {
-          return r.text().then(function (text) {
-            return { ok: r.ok, status: r.status, text: text };
-          });
-        })
-        .then(function (res) {
-          var pack;
-          try {
-            pack = JSON.parse(res.text);
-          } catch (e) {
-            showPack({
-              error: "llm-pack is not JSON",
-              http_status: res.status,
-              parse_error: String(e && e.message ? e.message : e),
-              body_preview: String(res.text || "").slice(0, 400),
-            });
-            return;
-          }
-          showPack(pack);
-          if (window.console && console.log) console.log("[llm-pack]", pack);
-        })
-        .catch(function (e) {
-          if (window.console && console.error) console.error(e);
-          showPack({ error: String(e) });
-        });
+      fetchJson("/api/llm-pack", function (pack) {
+        showPack(pack);
+        if (window.console && console.log) console.log("[llm-pack]", pack);
+      });
     }, typeof delayMs === "number" ? delayMs : 600);
+  }
+
+  function refreshVerify(delayMs) {
+    if (llmPackTimer) clearTimeout(llmPackTimer);
+    llmPackTimer = setTimeout(function () {
+      fetchJson("/api/verify", function (rep) {
+        showPack(rep);
+        var actionEl = document.getElementById("dash-interaction-action");
+        if (actionEl) actionEl.textContent = rep.ok ? "VERIFY OK" : "VERIFY FAIL";
+        if (window.console && console.log) console.log("[verify]", rep);
+      });
+    }, typeof delayMs === "number" ? delayMs : 0);
   }
 
   window.dashCaptureInteraction = function (args) {

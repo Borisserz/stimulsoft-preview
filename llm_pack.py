@@ -104,11 +104,100 @@ def build_llm_pack(
     filters: dict[str, Any] | None,
     interaction: dict[str, Any] | None,
     results: dict[str, Any] | None,
+    meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    pack: dict[str, Any] = {
+        "filters": dict(filters or {}),
+        "interaction": interaction,
+        "results": dict(results or {}),
+    }
+    if meta is not None:
+        pack["meta"] = dict(meta)
+    return json_safe(pack)
+
+
+def _norm(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, float):
+        if value.is_integer():
+            return str(int(value))
+        return str(value)
+    text = str(value).strip()
+    if text.endswith(".0"):
+        try:
+            float(text)
+            return text[:-2]
+        except ValueError:
+            pass
+    return text
+
+
+def build_verify_report(
+    *,
+    filters: dict[str, Any] | None,
+    results: dict[str, Any] | None,
+    filters_updated_at: str | None,
+    applied_log: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Compare store filters vs last applied query params vs captured results freshness."""
+    filters = dict(filters or {})
+    results = dict(results or {})
+    applied_log = list(applied_log or [])
+    issues: list[str] = []
+
+    filter_keys = {k for k in filters.keys() if not str(k).startswith("__")}
+    # latest apply per datasource
+    latest: dict[str, dict[str, Any]] = {}
+    for item in applied_log:
+        ds = str(item.get("dataSource") or "")
+        if ds:
+            latest[ds] = item
+
+    for ds, item in latest.items():
+        applied = dict(item.get("applied_params") or {})
+        for key in filter_keys:
+            if key not in applied:
+                continue
+            if _norm(applied.get(key)) != _norm(filters.get(key)):
+                issues.append(
+                    f"mismatch:{ds}:{key}:filter={filters.get(key)!r}:applied={applied.get(key)!r}"
+                )
+
+        snap = dict(item.get("filters_snapshot") or {})
+        for key in filter_keys:
+            if key in snap and _norm(snap.get(key)) != _norm(filters.get(key)):
+                issues.append(
+                    f"snapshot_mismatch:{ds}:{key}:filter={filters.get(key)!r}:snapshot={snap.get(key)!r}"
+                )
+
+        captured_at = str(item.get("captured_at") or "")
+        if filters_updated_at and captured_at and captured_at < str(filters_updated_at):
+            issues.append(f"stale:{ds}:captured_at={captured_at}:filters_updated_at={filters_updated_at}")
+
+    if not results:
+        issues.append("empty_results")
+    if filter_keys and not latest:
+        issues.append("no_applied_queries_yet")
+
     return json_safe(
         {
-            "filters": dict(filters or {}),
-            "interaction": interaction,
-            "results": dict(results or {}),
+            "ok": len(issues) == 0,
+            "issues": issues,
+            "filters": filters,
+            "filters_updated_at": filters_updated_at,
+            "sources": sorted(results.keys()),
+            "applied_sources": sorted(latest.keys()),
+            "applied_log_tail": applied_log[-20:],
+            "result_meta": {
+                name: {
+                    "row_count": (payload or {}).get("row_count"),
+                    "captured_at": (payload or {}).get("captured_at"),
+                    "applied_params": (payload or {}).get("applied_params"),
+                }
+                for name, payload in results.items()
+            },
         }
     )

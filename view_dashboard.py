@@ -47,7 +47,12 @@ from stimulsoft_reports.report.dictionary.StiVariable import StiVariable
 from stimulsoft_reports.report.enums.StiVariableType import StiVariableType
 from stimulsoft_reports.viewer import StiViewer
 
-from llm_pack import build_llm_pack, dumps_llm_pack, snapshot_from_data_args
+from llm_pack import (
+    build_llm_pack,
+    build_verify_report,
+    dumps_llm_pack,
+    snapshot_from_data_args,
+)
 
 ROOT = Path(__file__).resolve().parent
 
@@ -135,6 +140,16 @@ _INTERACTIONS: list[dict[str, Any]] = []
 _INTERACTIONS_MAX = 50
 # Результаты датасорсов после onEndProcessData (без SQL) — для LLM pack.
 _RESULTS: dict[str, Any] = {}
+_FILTERS_UPDATED_AT: str | None = None
+_FILTER_GEN: int = 0
+_APPLIED_LOG: list[dict[str, Any]] = []
+_APPLIED_LOG_MAX = 100
+# last BeginProcessData params per datasource (for verify / freshness)
+_PENDING_APPLY: dict[str, dict[str, Any]] = {}
+
+
+def _now_stamp() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 _STI_QUERY_SKIP = {"sti_event", "sti_data", "sti_handler"}
 
@@ -178,16 +193,27 @@ def params_snapshot() -> dict[str, Any]:
         return dict(_PARAMS)
 
 
-def params_update(values: dict[str, Any]) -> dict[str, Any]:
+def params_update(values: dict[str, Any], *, clear_results_on_change: bool = True) -> dict[str, Any]:
+    global _FILTERS_UPDATED_AT, _FILTER_GEN
     with _params_lock:
+        changed = False
         for key, value in values.items():
             if value is None:
-                _PARAMS.pop(key, None)
+                if key in _PARAMS:
+                    _PARAMS.pop(key, None)
+                    changed = True
             else:
+                if _PARAMS.get(key) != value:
+                    changed = True
                 _PARAMS[key] = value
+        if changed:
+            _FILTERS_UPDATED_AT = _now_stamp()
+            _FILTER_GEN += 1
+            if clear_results_on_change:
+                # иначе в pack торчат старые rows (типа 2026-01-01) до нового пересчёта
+                _RESULTS.clear()
+                _PENDING_APPLY.clear()
         return dict(_PARAMS)
-
-
 def coerce_value(type_name: str, value: Any) -> Any:
     if value is None or type_name is None:
         return value
@@ -236,6 +262,14 @@ def coerce_value(type_name: str, value: Any) -> Any:
     return value
 
 
+def _variable_values(args: StiVariablesEventArgs) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    variables = args.variables or {}
+    for name, var in variables.items():
+        out[str(name)] = getattr(var, "value", var)
+    return out
+
+
 def apply_params_to_variables(args: StiVariablesEventArgs) -> None:
     incoming = params_snapshot()
     incoming.update(_public_query_params())
@@ -246,6 +280,8 @@ def apply_params_to_variables(args: StiVariablesEventArgs) -> None:
         args.variables = {}
         variables = args.variables
     for name, raw in incoming.items():
+        if str(name).startswith("__"):
+            continue
         if name in variables:
             var = variables[name]
             var.value = coerce_value(var.typeName, raw)
@@ -256,11 +292,20 @@ def apply_params_to_variables(args: StiVariablesEventArgs) -> None:
 def begin_process_data(args: StiDataEventArgs) -> None:
     args.connectionString = PG_CONN
     incoming = params_snapshot()
-    if not incoming or not args.parameters:
-        return
-    for name, param in args.parameters.items():
-        if name in incoming:
-            param.value = incoming[name]
+    applied: dict[str, Any] = {}
+    if args.parameters:
+        for name, param in args.parameters.items():
+            if name in incoming:
+                param.value = incoming[name]
+            applied[str(name)] = getattr(param, "value", None)
+    ds = str(getattr(args, "dataSource", None) or getattr(args, "connection", None) or "unknown")
+    with _params_lock:
+        _PENDING_APPLY[ds] = {
+            "applied_params": dict(applied),
+            "filters_snapshot": dict(_PARAMS),
+            "started_at": _now_stamp(),
+            "gen": _FILTER_GEN,
+        }
 
 
 def end_process_data(args: StiDataEventArgs) -> None:
@@ -268,8 +313,29 @@ def end_process_data(args: StiDataEventArgs) -> None:
     name, payload = snapshot_from_data_args(args)
     if payload is None:
         return
+    stamp = _now_stamp()
     with _params_lock:
+        pending = dict(_PENDING_APPLY.pop(name, {}) or {})
+        # ответ от запроса со старыми Year/Month — выбрасываем
+        if pending and pending.get("gen") != _FILTER_GEN:
+            return
+        payload = dict(payload)
+        payload["captured_at"] = stamp
+        payload["applied_params"] = dict(pending.get("applied_params") or {})
         _RESULTS[name] = payload
+        _APPLIED_LOG.append(
+            {
+                "dataSource": name,
+                "applied_params": dict(pending.get("applied_params") or {}),
+                "filters_snapshot": dict(pending.get("filters_snapshot") or _PARAMS),
+                "row_count": payload.get("row_count"),
+                "captured_at": stamp,
+                "gen": pending.get("gen"),
+            }
+        )
+        overflow = len(_APPLIED_LOG) - _APPLIED_LOG_MAX
+        if overflow > 0:
+            del _APPLIED_LOG[:overflow]
 
 
 def results_snapshot() -> dict[str, Any]:
@@ -283,10 +349,30 @@ def llm_pack_snapshot() -> dict[str, Any]:
             filters=dict(_PARAMS),
             interaction=_LAST_INTERACTION,
             results={k: dict(v) for k, v in _RESULTS.items()},
+            meta={
+                "filters_updated_at": _FILTERS_UPDATED_AT,
+                "sources": list(_RESULTS.keys()),
+                "applied_log_len": len(_APPLIED_LOG),
+            },
+        )
+
+
+def verify_snapshot() -> dict[str, Any]:
+    with _params_lock:
+        return build_verify_report(
+            filters=dict(_PARAMS),
+            results={k: dict(v) for k, v in _RESULTS.items()},
+            filters_updated_at=_FILTERS_UPDATED_AT,
+            applied_log=list(_APPLIED_LOG),
         )
 
 
 def prepare_variables(args: StiVariablesEventArgs) -> None:
+    # 1) сначала забираем актуальные Year/Month/… из Stimulsoft (клиент — источник истины)
+    client_vars = _variable_values(args)
+    if client_vars:
+        params_update(client_vars, clear_results_on_change=True)
+    # 2) query-string / API overlay поверх
     apply_params_to_variables(args)
 
 
@@ -428,6 +514,13 @@ def get_llm_pack():
     return Response(body, mimetype="application/json; charset=utf-8")
 
 
+@app.get("/api/verify")
+def get_verify():
+    """Сверка: filters в store vs params, реально ушедшие в запросы, vs свежесть results."""
+    body = dumps_llm_pack(verify_snapshot())
+    return Response(body, mimetype="application/json; charset=utf-8")
+
+
 @app.post("/api/params")
 def post_params():
     incoming = _body_params()
@@ -441,12 +534,16 @@ def post_params():
 
 @app.delete("/api/params")
 def clear_params():
-    global _LAST_INTERACTION
+    global _LAST_INTERACTION, _FILTERS_UPDATED_AT, _FILTER_GEN
     with _params_lock:
         _PARAMS.clear()
         _LAST_INTERACTION = None
         _INTERACTIONS.clear()
         _RESULTS.clear()
+        _APPLIED_LOG.clear()
+        _PENDING_APPLY.clear()
+        _FILTERS_UPDATED_AT = None
+        _FILTER_GEN += 1
     return jsonify({"ok": True, "params": {}, "llm_pack": llm_pack_snapshot()})
 
 @app.route("/mrt", methods=["GET", "POST"])
@@ -505,6 +602,7 @@ def main() -> None:
     print(f"Viewer:   http://{HOST}:{PORT}/viewer", flush=True)
     print(f"Params:   POST/GET http://{HOST}:{PORT}/api/params", flush=True)
     print(f"LLM pack: GET http://{HOST}:{PORT}/api/llm-pack", flush=True)
+    print(f"Verify:   GET http://{HOST}:{PORT}/api/verify", flush=True)
     print(f"Clicks:   GET http://{HOST}:{PORT}/api/interactions", flush=True)
     if OPEN_BROWSER:
         try:
