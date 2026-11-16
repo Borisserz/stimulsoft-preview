@@ -443,6 +443,7 @@ def designer():
     wire_designer(designer)
 
     if sti_process(designer):
+        # ajax handler — без debug overlay
         return sti_response(designer)
 
     # query на первом открытии тоже кладём в store
@@ -453,7 +454,8 @@ def designer():
     report = StiReport()
     report.loadFile("/mrt")
     designer.report = report
-    return sti_response(designer)
+    # debug-панель и на designer (Preview), не только /viewer
+    return sti_response(designer, inject_debug=True)
 
 
 @app.route("/viewer", methods=["GET", "POST"])

@@ -179,7 +179,8 @@
       "results = данные всех датасорсов после Stimulsoft (без SQL).";
     el.appendChild(head);
     el.appendChild(pre);
-    document.body.appendChild(el);
+    // не в body: Stimulsoft при start() может переписать body
+    (document.documentElement || document.body).appendChild(el);
     document.getElementById("dash-interaction-hide").onclick = function () {
       el.style.display = "none";
     };

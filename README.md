@@ -30,4 +30,5 @@ notepad .env
 - http://127.0.0.1:8040/api/params  
 - http://127.0.0.1:8040/api/llm-pack — `{filters, interaction, results}` для LLM (без SQL)
 
-На viewer в углу — debug-панель: после клика по карте/кнопкам/фильтрам показывает JSON llm-pack.
+Debug-панель **llm-pack** (правый нижний угол) есть на `/viewer` и на `/designer`.
+После клика по карте/кнопкам/фильтрам показывает JSON. Если не видно — hard refresh (Ctrl+F5) и проверь что открыт именно этот порт после `git pull`.
