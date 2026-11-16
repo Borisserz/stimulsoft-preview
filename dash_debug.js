@@ -210,16 +210,34 @@
     }
     if (metaEl) {
       var nFilters = pack && pack.filters ? Object.keys(pack.filters).length : 0;
-      var nResults = pack && pack.results ? Object.keys(pack.results).length : 0;
+      var nResults = 0;
       var nRows = 0;
-      if (pack && pack.results) {
+      if (pack && pack.results && typeof pack.results === "object") {
+        nResults = Object.keys(pack.results).length;
         Object.keys(pack.results).forEach(function (k) {
           var r = pack.results[k];
           if (r && typeof r.row_count === "number") nRows += r.row_count;
         });
+      } else if (pack && Array.isArray(pack.sources)) {
+        // /api/verify payload
+        nResults = pack.sources.length;
+        if (pack.result_meta) {
+          Object.keys(pack.result_meta).forEach(function (k) {
+            var r = pack.result_meta[k];
+            if (r && typeof r.row_count === "number") nRows += r.row_count;
+          });
+        }
       }
+      var okBit =
+        pack && typeof pack.ok === "boolean" ? " ok=" + pack.ok : "";
       metaEl.textContent =
-        "filters=" + nFilters + " sources=" + nResults + " rows=" + nRows;
+        "filters=" +
+        nFilters +
+        " sources=" +
+        nResults +
+        " rows=" +
+        nRows +
+        okBit;
     }
     var pre = document.getElementById("dash-interaction-pre");
     if (pre) {

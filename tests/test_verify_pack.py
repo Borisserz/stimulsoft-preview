@@ -137,6 +137,38 @@ class SanitizeFilterKeysTests(unittest.TestCase):
         self.assertTrue(report["ok"])
         self.assertNotIn("0", report["filters"])
 
+    def test_button_meta_not_a_filter_key(self):
+        self.assertFalse(is_real_filter_key("elementName"))
+        self.assertFalse(is_real_filter_key("isChecked"))
+
+    def test_empty_applied_params_not_stale_if_snapshot_matches(self):
+        # Dashboard queries often have applied_params={} (vars via PrepareVariables).
+        report = build_verify_report(
+            filters={"year": "2025", "month": "2", "trendtype": "cumulative"},
+            results={
+                "count_imnsHead": {
+                    "row_count": 1,
+                    "captured_at": "2026-11-16 11:05:06",
+                    "applied_params": {},
+                }
+            },
+            filters_updated_at="2026-11-16 11:05:08",
+            applied_log=[
+                {
+                    "dataSource": "count_imnsHead",
+                    "applied_params": {},
+                    "filters_snapshot": {
+                        "year": "2025",
+                        "month": "2",
+                        "trendtype": "cumulative",
+                    },
+                    "row_count": 1,
+                    "captured_at": "2026-11-16 11:05:06",
+                }
+            ],
+        )
+        self.assertTrue(report["ok"], report["issues"])
+
 
 if __name__ == "__main__":
     unittest.main()

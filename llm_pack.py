@@ -135,12 +135,39 @@ def _norm(value: Any) -> str:
     return text
 
 
+# Interaction / widget metadata — not report variables (Year/Month/…).
+_BLOCKED_FILTER_KEYS = {
+    "elementName",
+    "isChecked",
+    "ComponentName",
+    "componentName",
+    "name",
+    "text",
+    "sender",
+    "event",
+    "action",
+    "preventDefault",
+    "async",
+    "data",
+    "report",
+    "page",
+    "pages",
+    "value",
+    "values",
+    "checked",
+    "enabled",
+    "visible",
+}
+
+
 def is_real_filter_key(key: Any) -> bool:
-    """Drop UI junk from interaction flatten: '0','1', '__action', labels-as-keys."""
+    """Drop UI junk from interaction flatten: '0','1', '__action', button meta."""
     name = str(key or "").strip()
     if not name or name.startswith("__"):
         return False
     if name.isdigit():
+        return False
+    if name in _BLOCKED_FILTER_KEYS:
         return False
     # allow year/month/vtypevd/trendtype/... — must start with a letter
     first = name[0]
@@ -174,7 +201,6 @@ def build_verify_report(
 
     for ds, item in latest.items():
         applied = sanitize_filters(dict(item.get("applied_params") or {}))
-        matched = False
         for key in filter_keys:
             if key not in applied:
                 continue
@@ -182,23 +208,26 @@ def build_verify_report(
                 issues.append(
                     f"mismatch:{ds}:{key}:filter={filters.get(key)!r}:applied={applied.get(key)!r}"
                 )
-            else:
-                matched = True
 
         snap = sanitize_filters(dict(item.get("filters_snapshot") or {}))
+        snap_ok = True
         for key in filter_keys:
-            if key in snap and _norm(snap.get(key)) != _norm(filters.get(key)):
+            if key not in snap:
+                continue
+            if _norm(snap.get(key)) != _norm(filters.get(key)):
+                snap_ok = False
                 issues.append(
                     f"snapshot_mismatch:{ds}:{key}:filter={filters.get(key)!r}:snapshot={snap.get(key)!r}"
                 )
 
         captured_at = str(item.get("captured_at") or "")
-        # stale only if timestamps say so AND applied params don't already match filters
+        # Many dashboard SQL adapters have empty applied_params (vars go via PrepareVariables).
+        # Treat as fresh when filters_snapshot already matches current filters.
         if (
             filters_updated_at
             and captured_at
             and captured_at < str(filters_updated_at)
-            and not matched
+            and not snap_ok
         ):
             issues.append(
                 f"stale:{ds}:captured_at={captured_at}:filters_updated_at={filters_updated_at}"
