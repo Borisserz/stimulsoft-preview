@@ -418,12 +418,12 @@
       pre.textContent = "";
       fetch("/api/params", { method: "DELETE" })
         .then(function () {
-          return refreshCompare(0);
+          return postViewportAndCompare();
         })
         .catch(function () {});
     };
     document.getElementById("dash-interaction-compare").onclick = function () {
-      postVisibleAndCompare();
+      postViewportAndCompare();
     };
     document.getElementById("dash-interaction-json").onclick = function () {
       refreshLlmPack(0);
@@ -549,6 +549,8 @@
     }, typeof delayMs === "number" ? delayMs : 600);
   }
 
+  var lastInteractionDump = null;
+
   function cellValue(cell) {
     if (cell == null) return null;
     if (typeof cell !== "object") return cell;
@@ -587,41 +589,192 @@
       }
       rows.push(obj);
     }
-    return {
-      columns: columns,
-      rows: rows,
-      row_count: rows.length,
-      source: "visible_grid",
-    };
+    return { columns: columns, rows: rows, row_count: rows.length };
   }
 
-  function scrapeVisibleResults() {
-    // Stimulsoft keeps filtered table rows on element.dataGrid.data
-    // (what you see; not the raw SQL snapshot of 50).
-    var out = {};
-    var nodes = document.getElementsByTagName("*");
-    for (var i = 0; i < nodes.length; i++) {
-      var el = nodes[i];
-      var attrs = el.elementAttributes;
-      if (!attrs || attrs.type !== "StiTableElement") continue;
-      var name = attrs.name || "Table" + i;
+  function elementTitle(attrs) {
+    var ca = attrs && attrs.contentAttributes;
+    if (!ca) return null;
+    if (ca.title != null && typeof ca.title !== "object") return String(ca.title);
+    if (ca.title && ca.title.text != null) return String(ca.title.text);
+    return null;
+  }
+
+  function cloneFiltersList(list) {
+    var arr = [];
+    var n = collectionLength(list);
+    if (n > 0) {
+      for (var i = 0; i < n; i++) arr.push(cloneFilterRule(collectionItem(list, i)));
+    } else if (Array.isArray(list)) {
+      list.forEach(function (it) {
+        arr.push(cloneFilterRule(it));
+      });
+    }
+    return arr.filter(function (f) {
+      return f && f.value !== undefined && f.value !== null && f.value !== "";
+    });
+  }
+
+  function visibleText(el, maxLen) {
+    try {
+      var t = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+      if (!t) return null;
+      return t.length > (maxLen || 400) ? t.slice(0, maxLen || 400) : t;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function snapshotElement(domEl) {
+    var attrs = domEl.elementAttributes;
+    if (!attrs || !attrs.type) return null;
+    var name = attrs.name || attrs.key || "element";
+    var type = attrs.type;
+    var out = { name: String(name), type: String(type), title: elementTitle(attrs) };
+    var ca = attrs.contentAttributes || {};
+
+    if (ca.filters) {
+      var ef = cloneFiltersList(ca.filters);
+      if (ef.length) out.filters = ef;
+    }
+
+    if (type === "StiTableElement") {
       var gridData =
-        (el.dataGrid && el.dataGrid.data) ||
-        (attrs.contentAttributes && attrs.contentAttributes.data) ||
-        null;
+        (domEl.dataGrid && domEl.dataGrid.data) || ca.data || null;
       var parsed = parseGridData(gridData);
-      if (parsed) out[name] = parsed;
+      if (parsed) {
+        out.columns = parsed.columns;
+        out.rows = parsed.rows;
+        out.row_count = parsed.row_count;
+      } else {
+        out.text = visibleText(domEl, 800);
+      }
+      return out;
+    }
+
+    if (
+      type === "StiIndicatorElement" ||
+      type === "StiProgressElement" ||
+      type === "StiGaugeElement" ||
+      type === "StiChartElement" ||
+      type === "StiRegionMapElement" ||
+      type === "StiOnlineMapElement" ||
+      type === "StiCardsElement" ||
+      type === "StiListBoxElement" ||
+      type === "StiComboBoxElement" ||
+      type === "StiTreeViewElement" ||
+      type === "StiTreeViewBoxElement" ||
+      type === "StiPivotTableElement" ||
+      type === "StiTextElement" ||
+      type.indexOf("Button") >= 0
+    ) {
+      if (ca.value !== undefined) out.value = cellValue(ca.value) != null ? cellValue(ca.value) : ca.value;
+      if (ca.text !== undefined) out.text = cellValue(ca.text) != null ? cellValue(ca.text) : ca.text;
+      if (ca.series !== undefined) out.series = safeClone(ca.series);
+      if (attrs.isChecked !== undefined) out.checked = !!attrs.isChecked;
+      if (ca.isChecked !== undefined) out.checked = !!ca.isChecked;
+      // Always attach human-visible text fallback
+      var vt = visibleText(domEl, 600);
+      if (vt && out.text == null) out.text = vt;
+      if (type === "StiChartElement" && ca.data) {
+        var chartGrid = parseGridData(ca.data);
+        if (chartGrid) {
+          out.columns = chartGrid.columns;
+          out.rows = chartGrid.rows;
+          out.row_count = chartGrid.row_count;
+        }
+      }
+      if (type === "StiRegionMapElement" && ca.filters) {
+        /* filters already copied */
+      }
+      return out;
+    }
+
+    // Unknown / other: keep title + visible text so nothing is silent-dropped
+    out.text = visibleText(domEl, 600);
+    return out;
+  }
+
+  function collectDashboardFilters(elements, interaction) {
+    var seen = {};
+    var out = [];
+    function add(rule) {
+      if (!rule || rule.value === undefined || rule.value === null || rule.value === "")
+        return;
+      var key = String(rule.path || "map") + "|" + String(rule.value);
+      if (seen[key]) return;
+      seen[key] = true;
+      out.push({
+        path: rule.path || "map",
+        value: rule.value,
+        condition: rule.condition || "EqualTo",
+      });
+    }
+    (elements || []).forEach(function (el) {
+      (el.filters || []).forEach(add);
+    });
+    if (interaction) {
+      ["filteringParameters", "drillDownParameters", "dashboardElementDrillDownParameters"].forEach(
+        function (bagName) {
+          var bag = interaction[bagName];
+          if (!bag) return;
+          if (bag.filters) cloneFiltersList(bag.filters).forEach(add);
+        }
+      );
+      (interaction.dashboard_filters || []).forEach(add);
     }
     return out;
   }
 
-  function postVisibleAndCompare() {
-    var visible = scrapeVisibleResults();
-    var body = { visible_results: visible };
-    fetch("/api/params", {
+  function snapshotViewport(interaction) {
+    var elements = [];
+    var seenNames = {};
+    var nodes = document.getElementsByTagName("*");
+    for (var i = 0; i < nodes.length; i++) {
+      var domEl = nodes[i];
+      if (!domEl.elementAttributes || !domEl.elementAttributes.type) continue;
+      var snap = snapshotElement(domEl);
+      if (!snap) continue;
+      // prefer first rich capture per name
+      if (seenNames[snap.name]) {
+        var prev = elements[seenNames[snap.name]];
+        var prevScore =
+          (prev.rows ? prev.rows.length : 0) + (prev.text ? 1 : 0) + (prev.value != null ? 1 : 0);
+        var nextScore =
+          (snap.rows ? snap.rows.length : 0) + (snap.text ? 1 : 0) + (snap.value != null ? 1 : 0);
+        if (nextScore > prevScore) elements[seenNames[snap.name]] = snap;
+        continue;
+      }
+      seenNames[snap.name] = elements.length;
+      elements.push(snap);
+    }
+    var panel = {};
+    if (interaction) {
+      var flat = flattenParams(interaction);
+      Object.keys(flat).forEach(function (k) {
+        panel[k] = flat[k];
+      });
+    }
+    return {
+      captured_at: new Date().toISOString(),
+      interaction: interaction || lastInteractionDump || null,
+      filters: {
+        panel: panel,
+        dashboard: collectDashboardFilters(elements, interaction || lastInteractionDump),
+      },
+      elements: elements,
+    };
+  }
+
+  function postViewportAndCompare() {
+    var vp = snapshotViewport(lastInteractionDump);
+    if (window.console && console.log) {
+      console.log("[viewport]", vp.elements.length, "elements", vp);
+    }
+    fetch("/api/viewport", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify(vp),
       cache: "no-store",
     })
       .then(function () {
@@ -633,29 +786,31 @@
       .then(function (text) {
         showText(text, "SVERKA");
       })
-      .catch(function () {});
+      .catch(function (e) {
+        showText(String(e), "ERROR");
+      });
   }
 
   function refreshAfterInteraction(action) {
-    // Wait for Stimulsoft to repaint filtered table, then scrape visible rows.
     var delays = [700, 1600, 2800];
     if (
       action === "DashboardElementDrillDown" ||
       action === "DashboardElementDrillUp" ||
       action === "DashboardDrillDown" ||
-      action === "DashboardFiltering"
+      action === "DashboardFiltering" ||
+      action === "DashboardButtonElementApplyEvents"
     ) {
       delays = [600, 1400, 2600, 4000];
     }
     delays.forEach(function (ms) {
-      setTimeout(postVisibleAndCompare, ms);
+      setTimeout(postViewportAndCompare, ms);
     });
   }
 
   window.dashCaptureInteraction = function (args) {
     try {
       var dump = dumpArgs(args);
-      // flatten from the cloned dump so FilterRule path/value survive
+      lastInteractionDump = dump;
       var params = flattenParams(dump);
       ensurePanel();
       var actionEl = document.getElementById("dash-interaction-action");
@@ -684,14 +839,15 @@
   };
 
   window.dashRefreshLlmPack = refreshLlmPack;
+  window.dashSnapshotViewport = snapshotViewport;
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", function () {
       ensurePanel();
-      setTimeout(postVisibleAndCompare, 1500);
+      setTimeout(postViewportAndCompare, 1800);
     });
   } else {
     ensurePanel();
-    setTimeout(postVisibleAndCompare, 1500);
+    setTimeout(postViewportAndCompare, 1800);
   }
 })();

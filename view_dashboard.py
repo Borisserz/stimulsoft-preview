@@ -48,8 +48,6 @@ from stimulsoft_reports.report.enums.StiVariableType import StiVariableType
 from stimulsoft_reports.viewer import StiViewer
 
 from llm_pack import (
-    build_compare_text,
-    build_llm_pack,
     build_results_digest,
     build_verify_report,
     dumps_llm_pack,
@@ -58,6 +56,11 @@ from llm_pack import (
     sanitize_filters,
     snapshot_from_data_args,
     update_filter_state,
+)
+from viewport_pack import (
+    build_viewport_compare_text,
+    build_viewport_pack,
+    normalize_viewport,
 )
 
 ROOT = Path(__file__).resolve().parent
@@ -149,19 +152,19 @@ _PARAMS: dict[str, Any] = {}
 _LAST_INTERACTION: dict[str, Any] | None = None
 _INTERACTIONS: list[dict[str, Any]] = []
 _INTERACTIONS_MAX = 50
-# Результаты датасорсов после onEndProcessData (без SQL) — для LLM pack.
+# SQL/onEndProcessData snapshot — debug only, NOT for LLM pack.
 _RESULTS: dict[str, Any] = {}
-# Visible Stimulsoft table grids (already filtered on frontend) — prefer over _RESULTS.
-_VISIBLE_RESULTS: dict[str, Any] = {}
+# Full visible dashboard snapshot from client (source of truth for LLM/SVERKA).
+_VIEWPORT: dict[str, Any] | None = None
 _FILTERS_UPDATED_AT: str | None = None
 _FILTER_GEN: int = 0
 _APPLIED_LOG: list[dict[str, Any]] = []
 _APPLIED_LOG_MAX = 100
 # last BeginProcessData params per datasource (for verify / freshness)
 _PENDING_APPLY: dict[str, dict[str, Any]] = {}
-# region drill-in levels (DashboardElementDrillDown / DrillUp)
+# region drill-in levels (kept for interaction enrichment / debug)
 _DRILL_STACK: list[list[dict[str, Any]]] = []
-# Apply-Filter from map/table/list clicks (DashboardFiltering)
+# Apply-Filter from map/table/list clicks (debug / interaction enrich)
 _APPLY_FILTERS: list[dict[str, Any]] = []
 
 
@@ -211,7 +214,7 @@ def params_snapshot() -> dict[str, Any]:
 
 
 def params_update(values: dict[str, Any], *, clear_results_on_change: bool = True) -> dict[str, Any]:
-    global _FILTERS_UPDATED_AT, _FILTER_GEN, _DRILL_STACK, _APPLY_FILTERS, _VISIBLE_RESULTS
+    global _FILTERS_UPDATED_AT, _FILTER_GEN, _DRILL_STACK, _APPLY_FILTERS, _VIEWPORT
     with _params_lock:
         real_changed = False
         for key, value in values.items():
@@ -234,9 +237,9 @@ def params_update(values: dict[str, Any], *, clear_results_on_change: bool = Tru
             _FILTERS_UPDATED_AT = _now_stamp()
             _FILTER_GEN += 1
             if clear_results_on_change:
-                # иначе в pack торчат старые rows (типа 2026-01-01) до нового пересчёта
+                # Year/Month changed — drop old SQL debug + viewport until new paint
                 _RESULTS.clear()
-                _VISIBLE_RESULTS = {}
+                _VIEWPORT = None
                 _PENDING_APPLY.clear()
                 # Year/Month change invalidates map drill / apply-filter state
                 _DRILL_STACK = []
@@ -374,33 +377,21 @@ def results_snapshot() -> dict[str, Any]:
 
 
 def llm_pack_snapshot() -> dict[str, Any]:
+    """LLM pack from viewport only (what the human sees)."""
     with _params_lock:
-        # Prefer what the user sees in Stimulsoft tables (already filtered).
-        use_visible = bool(_VISIBLE_RESULTS)
-        results = (
-            {k: dict(v) for k, v in _VISIBLE_RESULTS.items()}
-            if use_visible
-            else {k: dict(v) for k, v in _RESULTS.items()}
-        )
-        pack = build_llm_pack(
-            filters=sanitize_filters(_PARAMS),
-            interaction=_LAST_INTERACTION,
-            results=results,
-            # visible grids are already filtered by Stimulsoft — do not re-filter
-            apply_dashboard_filters=not use_visible,
-            drill_stack=list(_DRILL_STACK),
-            apply_filters=list(_APPLY_FILTERS),
-            meta={
-                "filters_updated_at": _FILTERS_UPDATED_AT,
-                "sources": list(results.keys()),
-                "applied_log_len": len(_APPLIED_LOG),
-                "drill_level": len(_DRILL_STACK),
-                "apply_filter_count": len(_APPLY_FILTERS),
-                "results_source": "visible" if use_visible else "sql_snapshot",
-            },
-        )
-        pack["results_source"] = "visible" if use_visible else "sql_snapshot"
-        return pack
+        vp = dict(_VIEWPORT) if isinstance(_VIEWPORT, dict) else None
+        inter = _LAST_INTERACTION
+        panel = sanitize_filters(_PARAMS)
+    pack = build_viewport_pack(vp)
+    # merge server-known panel vars if client omitted them
+    if panel:
+        merged = dict(pack.get("filters") or {})
+        for k, v in panel.items():
+            merged.setdefault(k, v)
+        pack["filters"] = merged
+    if inter and not pack.get("interaction"):
+        pack["interaction"] = inter
+    return pack
 
 
 def verify_snapshot() -> dict[str, Any]:
@@ -597,7 +588,7 @@ def get_llm_pack():
 
 @app.get("/api/llm-pack-digest")
 def get_llm_pack_digest():
-    """Короткий текст по УЖЕ отфильтрованному pack (не сырой SQL)."""
+    """Короткий текст по viewport-таблицам."""
     text = build_results_digest(
         llm_pack_snapshot().get("results") or {}, max_rows_per_source=8
     )
@@ -606,8 +597,8 @@ def get_llm_pack_digest():
 
 @app.get("/api/compare")
 def get_compare():
-    """Человекочитаемая сверка с фронтом: фильтры + реальные строки. Без verify-журнала."""
-    text = build_compare_text(llm_pack_snapshot(), max_rows=15)
+    """SVERKA: viewport only (what is drawn on the dashboard)."""
+    text = build_viewport_compare_text(llm_pack_snapshot(), max_rows=15)
     return Response(text.encode("utf-8"), content_type="text/plain; charset=utf-8")
 
 
@@ -618,26 +609,44 @@ def get_verify():
     return Response(body.encode("utf-8"), content_type="application/json; charset=utf-8")
 
 
+@app.get("/api/debug/sql-snapshot")
+def get_debug_sql_snapshot():
+    """Optional debug: raw onEndProcessData rows (NOT for LLM)."""
+    with _params_lock:
+        body = dumps_llm_pack(
+            {"results_source": "sql_snapshot_debug", "results": dict(_RESULTS)}
+        )
+    return Response(body.encode("utf-8"), content_type="application/json; charset=utf-8")
+
+
+@app.post("/api/viewport")
+def post_viewport():
+    """Replace full visible-dashboard snapshot from the browser."""
+    global _VIEWPORT
+    body = request.get_json(silent=True) if request.is_json else None
+    if not isinstance(body, dict):
+        return Response('need JSON viewport object', status=400)
+    vp = normalize_viewport(body)
+    # remember interaction if embedded
+    if isinstance(body.get("interaction"), dict):
+        remember_interaction(body["interaction"])
+    with _params_lock:
+        _VIEWPORT = vp
+    pack = llm_pack_snapshot()
+    return Response(
+        dumps_llm_pack({"ok": True, "llm_pack": pack}).encode("utf-8"),
+        content_type="application/json; charset=utf-8",
+    )
+
+
 @app.post("/api/params")
 def post_params():
-    global _VISIBLE_RESULTS
     incoming = _body_params()
     incoming.update(_public_query_params())
     body = request.get_json(silent=True) if request.is_json else None
     if isinstance(body, dict) and body.get("interaction") is not None:
         remember_interaction(body.get("interaction"))
-    if isinstance(body, dict) and isinstance(body.get("visible_results"), dict):
-        cleaned: dict[str, Any] = {}
-        for name, payload in body["visible_results"].items():
-            if isinstance(payload, dict) and (
-                payload.get("rows") is not None or payload.get("row_count") is not None
-            ):
-                cleaned[str(name)] = dict(payload)
-        with _params_lock:
-            _VISIBLE_RESULTS = cleaned
-    # Do NOT clear results on map/button clicks — client-side filter often
-    # does not re-query, and wiping made the panel look "empty" after Брест.
-    # Year/Month reloads clear via prepare_variables instead.
+    # Do NOT clear viewport on map clicks — client will POST /api/viewport after repaint.
     updated = params_update(incoming, clear_results_on_change=False)
     pack = llm_pack_snapshot()
     return Response(
@@ -651,13 +660,13 @@ def post_params():
 @app.delete("/api/params")
 def clear_params():
     global _LAST_INTERACTION, _FILTERS_UPDATED_AT, _FILTER_GEN, _DRILL_STACK, _APPLY_FILTERS
-    global _VISIBLE_RESULTS
+    global _VIEWPORT
     with _params_lock:
         _PARAMS.clear()
         _LAST_INTERACTION = None
         _INTERACTIONS.clear()
         _RESULTS.clear()
-        _VISIBLE_RESULTS = {}
+        _VIEWPORT = None
         _APPLIED_LOG.clear()
         _PENDING_APPLY.clear()
         _DRILL_STACK = []
@@ -669,18 +678,42 @@ def clear_params():
 
 @app.post("/api/smoke-seed")
 def smoke_seed():
-    """Local-only: inject fake rows without DB/MRT. Requires ALLOW_SMOKE_SEED=1."""
+    """Local-only: inject a viewport without DB/MRT. Requires ALLOW_SMOKE_SEED=1."""
+    global _VIEWPORT
     if os.environ.get("ALLOW_SMOKE_SEED", "").lower() not in {"1", "true", "yes"}:
         return Response("smoke seed disabled", status=404)
     body = request.get_json(silent=True) if request.is_json else None
-    if not isinstance(body, dict) or not isinstance(body.get("results"), dict):
-        return Response('need JSON {"results":{...}}', status=400)
-    with _params_lock:
+    if not isinstance(body, dict):
+        return Response("need JSON viewport or {viewport|results}", status=400)
+    raw = body.get("viewport") if isinstance(body.get("viewport"), dict) else body
+    # legacy: {results: {name: payload}} → synthetic viewport tables
+    if isinstance(body.get("results"), dict) and "elements" not in raw:
+        elements = []
         for name, payload in body["results"].items():
-            if isinstance(payload, dict):
-                _RESULTS[str(name)] = dict(payload)
-    return jsonify({"ok": True, "sources": list(_RESULTS.keys())})
-
+            if not isinstance(payload, dict):
+                continue
+            elements.append(
+                {
+                    "name": str(name),
+                    "type": "StiTableElement",
+                    "columns": list(payload.get("columns") or []),
+                    "rows": list(payload.get("rows") or []),
+                    "row_count": int(
+                        payload.get("row_count") or len(payload.get("rows") or [])
+                    ),
+                }
+            )
+        raw = {
+            "captured_at": "smoke",
+            "filters": body.get("filters")
+            or {"panel": {}, "dashboard": body.get("dashboard_filters") or []},
+            "interaction": body.get("interaction"),
+            "elements": elements,
+        }
+    vp = normalize_viewport(raw)
+    with _params_lock:
+        _VIEWPORT = vp
+    return jsonify({"ok": True, "elements": len(vp.get("elements") or [])})
 
 @app.route("/mrt", methods=["GET", "POST"])
 def serve_mrt():

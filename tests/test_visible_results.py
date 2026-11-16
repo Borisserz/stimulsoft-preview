@@ -1,4 +1,4 @@
-"""Visible table rows from Stimulsoft DOM must win over raw SQL snapshot."""
+"""Backward-compat alias — viewport is the source of truth now."""
 
 from __future__ import annotations
 
@@ -16,46 +16,37 @@ os.environ.setdefault("VIEWER_OPEN", "0")
 import view_dashboard as vd
 
 
-class VisibleResultsTests(unittest.TestCase):
-    def setUp(self) -> None:
+class VisibleResultsCompatTests(unittest.TestCase):
+    def test_viewport_not_sql(self) -> None:
         c = vd.app.test_client()
         c.delete("/api/params")
-        self.client = c
-
-    def test_visible_results_override_raw_sql_snapshot(self) -> None:
-        # raw SQL snapshot: 50 rows (what onEndProcessData captured)
-        raw = {
-            "columns": ["region", "name"],
-            "row_count": 50,
-            "rows": [{"region": "X", "name": f"r{i}"} for i in range(50)],
-        }
         with vd._params_lock:
-            vd._RESULTS["payments"] = raw
-
-        # frontend table after filter: 10 rows
-        visible = {
-            "Table1": {
-                "columns": ["region", "name"],
-                "row_count": 10,
-                "rows": [
-                    {"region": "Брестская", "name": f"p{i}"} for i in range(10)
-                ],
-                "source": "visible_grid",
+            vd._RESULTS["payments"] = {
+                "columns": ["a"],
+                "row_count": 50,
+                "rows": [{"a": i} for i in range(50)],
             }
-        }
-        r = self.client.post("/api/params", json={"visible_results": visible})
-        self.assertEqual(r.status_code, 200)
-
-        pack = self.client.get("/api/llm-pack").get_json()
-        self.assertIn("Table1", pack["results"])
+        c.post(
+            "/api/viewport",
+            json={
+                "elements": [
+                    {
+                        "name": "Table1",
+                        "type": "StiTableElement",
+                        "columns": ["region"],
+                        "rows": [{"region": "X"} for _ in range(10)],
+                        "row_count": 10,
+                    }
+                ]
+            },
+        )
+        pack = c.get("/api/llm-pack").get_json()
+        self.assertEqual(pack["results_source"], "viewport")
         self.assertEqual(pack["results"]["Table1"]["row_count"], 10)
         self.assertNotIn("payments", pack["results"])
-        self.assertEqual(pack.get("results_source"), "visible")
-
-        text = self.client.get("/api/compare").get_data().decode("utf-8")
-        self.assertIn("posle_filtra=10", text)
-        self.assertIn("VISIBLE", text)
-        self.assertNotIn("posle_filtra=50", text)
+        text = c.get("/api/compare").get_data().decode("utf-8")
+        self.assertIn("VIEWPORT", text)
+        self.assertIn("strok=10", text)
 
 
 if __name__ == "__main__":
