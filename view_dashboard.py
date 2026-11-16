@@ -137,7 +137,11 @@ _INTERACTIONS_MAX = 50
 _RESULTS: dict[str, Any] = {}
 
 _STI_QUERY_SKIP = {"sti_event", "sti_data", "sti_handler"}
-_DEBUG_JS = (ROOT / "dash_debug.js").read_text(encoding="utf-8")
+
+
+def _load_debug_js() -> str:
+    # read each time; utf-8-sig strips BOM if Windows editors added it
+    return (ROOT / "dash_debug.js").read_text(encoding="utf-8-sig")
 
 
 def _public_query_params() -> dict[str, str]:
@@ -323,12 +327,20 @@ def sti_response(component, inject_debug: bool = False):
     resp = component.getFrameworkResponse()
     if inject_debug and hasattr(resp, "get_data") and hasattr(resp, "set_data"):
         html = resp.get_data(as_text=True)
-        tag = '<script src="/dash-debug.js"></script>\n'
-        if "dash-debug.js" not in html:
+        # inline script: avoids Windows encoding breakage of a separate .js fetch
+        if "dash-interaction-debug" not in html and "dashCaptureInteraction" not in html:
+            js = _load_debug_js()
+            tag = (
+                "<script type=\"text/javascript\">\n"
+                + js
+                + "\n</script>\n"
+            )
             if "</head>" in html:
                 html = html.replace("</head>", tag + "</head>", 1)
+            elif "</body>" in html:
+                html = html.replace("</body>", tag + "</body>", 1)
             else:
-                html = tag + html
+                html = html + tag
             resp.set_data(html)
     return resp
 
@@ -377,7 +389,10 @@ def favicon():
 
 @app.get("/dash-debug.js")
 def dash_debug_js():
-    resp = Response(_DEBUG_JS, mimetype="application/javascript; charset=utf-8")
+    resp = Response(
+        _load_debug_js().encode("utf-8"),
+        mimetype="application/javascript; charset=utf-8",
+    )
     resp.headers["Cache-Control"] = "no-store"
     return resp
 

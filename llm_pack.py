@@ -9,10 +9,27 @@ from typing import Any
 from uuid import UUID
 
 
+def _clean_str(text: str) -> str:
+    # drop NULs / unpaired surrogates / most controls that break JSON.parse on some browsers
+    out: list[str] = []
+    for ch in text:
+        o = ord(ch)
+        if o == 0:
+            continue
+        if o < 32 and ch not in "\t\n\r":
+            continue
+        if 0xD800 <= o <= 0xDFFF:
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
 def json_safe(value: Any) -> Any:
-    """Convert Postgres/adapter values into JSON-serializable forms (UTF-8 text)."""
-    if value is None or isinstance(value, (bool, int, float, str)):
+    """Convert Postgres/adapter values into JSON-serializable forms."""
+    if value is None or isinstance(value, (bool, int, float)):
         return value
+    if isinstance(value, str):
+        return _clean_str(value)
     if isinstance(value, Decimal):
         # keep scale as string so LLM sees exact money/amounts
         return format(value, "f")
@@ -27,18 +44,19 @@ def json_safe(value: Any) -> Any:
     if isinstance(value, (bytes, bytearray, memoryview)):
         raw = bytes(value)
         try:
-            return raw.decode("utf-8")
+            return _clean_str(raw.decode("utf-8"))
         except UnicodeDecodeError:
             return raw.hex()
     if isinstance(value, dict):
         return {str(k): json_safe(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [json_safe(v) for v in value]
-    return str(value)
+    return _clean_str(str(value))
 
 
 def dumps_llm_pack(pack: Any) -> str:
-    return json.dumps(json_safe(pack), ensure_ascii=False, indent=2)
+    # ensure_ascii=True: pure ASCII JSON, no mojibake squares on Windows codepages
+    return json.dumps(json_safe(pack), ensure_ascii=True, indent=2)
 
 
 def rows_as_records(

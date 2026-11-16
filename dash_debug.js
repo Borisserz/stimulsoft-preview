@@ -1,5 +1,7 @@
-/* Viewer interaction dump: click → overlay + POST /api/params */
+/* Viewer llm-pack debug panel (ASCII-only for Windows encoding safety) */
 (function () {
+  "use strict";
+
   var ACTIONS = [
     "InitVars",
     "Variables",
@@ -21,6 +23,8 @@
     "drillDownParameters",
   ];
 
+  var llmPackTimer = null;
+
   function safeClone(value) {
     if (value == null) return value;
     if (typeof value !== "object") return value;
@@ -36,10 +40,7 @@
   }
 
   function dumpArgs(args) {
-    var out = {
-      __keys: [],
-      __knownActions: ACTIONS,
-    };
+    var out = { __keys: [], __knownActions: ACTIONS };
     if (!args || typeof args !== "object") {
       out.raw = args;
       return out;
@@ -59,7 +60,6 @@
       }
       out[k] = safeClone(args[k]);
     }
-    // на случай non-enumerable / пропущенных полей из доки
     [
       "event",
       "sender",
@@ -110,7 +110,6 @@
         if (v && typeof v === "object" && "value" in v && !Array.isArray(v)) {
           put(prefix ? prefix + "." + k : k, v.value);
         } else if (v && typeof v === "object" && !Array.isArray(v)) {
-          // плоские поля Stimulsoft (ComponentName, DataBand, …)
           var nestedKeys = Object.keys(v);
           var looksNested = nestedKeys.some(function (nk) {
             return v[nk] && typeof v[nk] === "object";
@@ -133,9 +132,6 @@
     if (args.action) put("__action", args.action);
     return params;
   }
-
-  var llmPackTimer = null;
-  var lastInteractionDump = null;
 
   function ensurePanel() {
     var el = document.getElementById("dash-interaction-debug");
@@ -160,7 +156,7 @@
     ].join(";");
     var head = document.createElement("div");
     head.style.cssText =
-      "display:flex;align-items:center;gap:8px;padding:8px 10px;background:#111827;border-bottom:1px solid #334155;cursor:move;user-select:none;flex-wrap:wrap;";
+      "display:flex;align-items:center;gap:8px;padding:8px 10px;background:#111827;border-bottom:1px solid #334155;flex-wrap:wrap;";
     head.innerHTML =
       '<strong style="color:#86efac">llm-pack</strong>' +
       '<span id="dash-interaction-action" style="color:#93c5fd"></span>' +
@@ -174,19 +170,17 @@
     pre.style.cssText =
       "margin:0;padding:10px;overflow:auto;flex:1;white-space:pre-wrap;word-break:break-word;color:#bbf7d0;";
     pre.textContent =
-      "Кликай карту / кнопки / фильтры — сюда придёт JSON для LLM:\n" +
-      "{ filters, interaction, results }\n\n" +
-      "results = данные всех датасорсов после Stimulsoft (без SQL).";
+      "Click map / top buttons / filters.\n" +
+      "This panel shows JSON for LLM: { filters, interaction, results }\n" +
+      "Check header: sources=N rows=M";
     el.appendChild(head);
     el.appendChild(pre);
-    // не в body: Stimulsoft при start() может переписать body
     (document.documentElement || document.body).appendChild(el);
     document.getElementById("dash-interaction-hide").onclick = function () {
       el.style.display = "none";
     };
     document.getElementById("dash-interaction-clear").onclick = function () {
       pre.textContent = "";
-      lastInteractionDump = null;
       fetch("/api/params", { method: "DELETE" })
         .then(function () {
           return refreshLlmPack(0);
@@ -223,14 +217,20 @@
         "filters=" + nFilters + " sources=" + nResults + " rows=" + nRows;
     }
     var pre = document.getElementById("dash-interaction-pre");
-    if (pre) pre.textContent = JSON.stringify(pack, null, 2);
+    if (pre) {
+      try {
+        pre.textContent = JSON.stringify(pack, null, 2);
+      } catch (e) {
+        pre.textContent = String(pack);
+      }
+    }
     window.__llmPack = pack;
   }
 
   function refreshLlmPack(delayMs) {
     if (llmPackTimer) clearTimeout(llmPackTimer);
     llmPackTimer = setTimeout(function () {
-      fetch("/api/llm-pack")
+      fetch("/api/llm-pack", { cache: "no-store" })
         .then(function (r) {
           return r.text().then(function (text) {
             return { ok: r.ok, status: r.status, text: text };
@@ -244,14 +244,13 @@
             showPack({
               error: "llm-pack is not JSON",
               http_status: res.status,
-              body_preview: String(res.text || "").slice(0, 500),
+              parse_error: String(e && e.message ? e.message : e),
+              body_preview: String(res.text || "").slice(0, 400),
             });
             return;
           }
           showPack(pack);
-          if (window.console && console.log) {
-            console.log("[llm-pack]", pack);
-          }
+          if (window.console && console.log) console.log("[llm-pack]", pack);
         })
         .catch(function (e) {
           if (window.console && console.error) console.error(e);
@@ -264,7 +263,6 @@
     try {
       var dump = dumpArgs(args);
       var params = flattenParams(args);
-      lastInteractionDump = dump;
       ensurePanel();
       var actionEl = document.getElementById("dash-interaction-action");
       if (actionEl) actionEl.textContent = dump.action || "(no action)";
@@ -274,17 +272,14 @@
       fetch("/api/params", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          params: params,
-          interaction: dump,
-        }),
+        body: JSON.stringify({ params: params, interaction: dump }),
+        cache: "no-store",
       })
         .then(function () {
-          // ждём пересчёт запросов после клика по карте/кнопкам
-          refreshLlmPack(700);
+          refreshLlmPack(800);
         })
         .catch(function () {
-          refreshLlmPack(700);
+          refreshLlmPack(800);
         });
     } catch (e) {
       if (window.console && console.error) console.error(e);
@@ -293,7 +288,6 @@
 
   window.dashRefreshLlmPack = refreshLlmPack;
 
-  // панель сразу + первый pack после загрузки дашборда
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", function () {
       ensurePanel();
