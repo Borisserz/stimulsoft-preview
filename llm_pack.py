@@ -66,16 +66,34 @@ def build_results_digest(
     results = dict(results or {})
     if not results:
         return "NO RESULTS YET — wait for dashboard queries, then press refresh (not verify)."
-    lines: list[str] = ["RESULTS DIGEST (names + numbers from SQL adapters):"]
+    lines: list[str] = [
+        "RESULTS DIGEST (only rows matching active map/drill filters):"
+    ]
+    shown = 0
     for name in sorted(results.keys()):
         payload = results.get(name) or {}
         rows = list(payload.get("rows") or [])
         row_count = payload.get("row_count", len(rows))
-        lines.append(f"- {name}: row_count={row_count}")
+        omitted = payload.get("omitted")
+        if omitted:
+            lines.append(
+                f"- {name}: OMITTED ({omitted}), "
+                f"unfiltered_was={payload.get('row_count_unfiltered', '?')}"
+            )
+            continue
+        if row_count == 0 and not rows:
+            lines.append(f"- {name}: row_count=0 (no rows after filter)")
+            continue
+        shown += 1
+        scope = payload.get("filter_scope")
+        extra = f" [{scope}]" if scope else ""
+        lines.append(f"- {name}: row_count={row_count}{extra}")
         for i, row in enumerate(rows[: max(0, max_rows_per_source)]):
             lines.append(f"    [{i}] {json.dumps(json_safe(row), ensure_ascii=False)}")
         if len(rows) > max_rows_per_source:
             lines.append(f"    ... +{len(rows) - max_rows_per_source} more rows")
+    if shown == 0:
+        lines.append("(no visible filtered rows — click map/region or clear filters)")
     return "\n".join(lines)
 
 
@@ -119,6 +137,19 @@ def snapshot_from_data_args(args: Any) -> tuple[str, dict[str, Any] | None]:
     }
 
 
+def _looks_like_column_path(name: Any) -> bool:
+    text = str(name or "").strip()
+    if not text:
+        return False
+    # FilterRule.key is often a GUID — never treat as a data column
+    compact = text.replace("-", "")
+    if len(text) >= 32 and all(c in "0123456789abcdefABCDEF" for c in compact):
+        return False
+    if text.isdigit():
+        return False
+    return True
+
+
 def _rules_from_filter_list(raw: Any) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         return []
@@ -126,18 +157,24 @@ def _rules_from_filter_list(raw: Any) -> list[dict[str, Any]]:
     for item in raw:
         if not isinstance(item, dict):
             continue
+        # Prefer real column path; never fall back to GUID key
         path = (
             item.get("path")
             or item.get("column")
             or item.get("columnName")
             or item.get("name")
-            or item.get("key")
         )
         if path is None or path == "":
+            key = item.get("key")
+            path = key if _looks_like_column_path(key) else None
+        if path is None or path == "" or not _looks_like_column_path(path):
             continue
         if "value" not in item and "values" not in item:
             continue
         value = item.get("value") if "value" in item else item.get("values")
+        # Skip empty filter values — they match everything / nothing useful
+        if value is None or value == "":
+            continue
         rules.append(
             {
                 "path": str(path),
@@ -231,25 +268,61 @@ def update_drill_stack(
     stack: list[list[dict[str, Any]]] | None,
     interaction: dict[str, Any] | None,
 ) -> tuple[list[list[dict[str, Any]]], list[dict[str, Any]]]:
-    """Maintain region drill-in levels (DashboardElementDrillDown / DrillUp)."""
-    stack = [list(level) for level in list(stack or [])]
+    """Backward-compatible wrapper around update_filter_state."""
+    _apply, new_stack, combined = update_filter_state([], stack, interaction)
+    return new_stack, combined
+
+
+def update_filter_state(
+    apply_filters: list[dict[str, Any]] | None,
+    drill_stack: list[list[dict[str, Any]]] | None,
+    interaction: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], list[list[dict[str, Any]]], list[dict[str, Any]]]:
+    """Track Apply-Filter + element drill-in levels across all dashboard elements.
+
+    Returns (apply_filters, drill_stack, combined_rules).
+    """
+    apply_filters = list(apply_filters or [])
+    drill_stack = [list(level) for level in list(drill_stack or [])]
     if not interaction or not isinstance(interaction, dict):
-        flat = [rule for level in stack for rule in level]
-        return stack, flat
+        return apply_filters, drill_stack, _dedupe_rules(apply_filters + _flatten_stack(drill_stack))
+
     action = str(interaction.get("action") or "")
     rules = extract_dashboard_filter_rules(interaction)
-    if action == "DashboardElementDrillDown" and rules:
-        stack.append(rules)
+
+    if action == "DashboardFiltering":
+        # Replace apply-filter set for the clicked element (map/table/list/…)
+        apply_filters = rules
+    elif action == "DashboardElementDrillDown" and rules:
+        drill_stack.append(rules)
     elif action == "DashboardElementDrillUp":
-        if stack:
-            stack.pop()
-    elif action in {
-        "DashboardResetAllFilters",
-        "InitVars",
-    }:
-        stack.clear()
-    flat = [rule for level in stack for rule in level]
-    return stack, flat
+        if drill_stack:
+            drill_stack.pop()
+    elif action in {"DashboardResetAllFilters", "InitVars"}:
+        apply_filters = []
+        drill_stack.clear()
+    elif action == "DashboardDrillDown" and rules:
+        # Opening nested dashboard with parameters — treat as apply filters
+        apply_filters = _dedupe_rules(apply_filters + rules)
+
+    combined = _dedupe_rules(apply_filters + _flatten_stack(drill_stack))
+    return apply_filters, drill_stack, combined
+
+
+def _flatten_stack(stack: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    return [rule for level in stack for rule in level]
+
+
+def _dedupe_rules(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str]] = set()
+    out: list[dict[str, Any]] = []
+    for rule in rules:
+        key = (str(rule.get("path")), _norm(rule.get("value")))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(rule)
+    return out
 
 
 def _column_tail(name: Any) -> str:
@@ -260,28 +333,50 @@ def _column_tail(name: Any) -> str:
 
 
 def _row_matches_rule(row: dict[str, Any], rule: dict[str, Any]) -> bool:
+    """Strict: only match the filter path against a real column — never any-cell."""
     want = _norm(rule.get("value"))
     path = str(rule.get("path") or "")
     tail = _column_tail(path)
-    matched_col = False
+    condition = str(rule.get("condition") or "EqualTo")
     for key, cell in row.items():
         key_s = str(key)
-        if key_s.lower() == path.lower() or _column_tail(key_s) == tail:
-            matched_col = True
-            if _norm(cell) == want:
-                return True
-    if matched_col:
+        if key_s.lower() != path.lower() and _column_tail(key_s) != tail:
+            continue
+        got = _norm(cell)
+        if condition in {"equalTo", "EqualTo", "="}:
+            return got == want
+        if condition in {"notEqualTo", "NotEqualTo", "<>"}:
+            return got != want
+        # unknown condition → equalTo
+        return got == want
+    return False
+
+
+def _source_has_rule_columns(
+    dict_rows: list[dict[str, Any]], rules: list[dict[str, Any]]
+) -> bool:
+    if not dict_rows or not rules:
         return False
-    # no matching column name — keep row only if any cell equals the filter value
-    # (helps when path is internal meter id but region name is in another column)
-    return any(_norm(cell) == want for cell in row.values())
+    paths = {_column_tail(r.get("path")) for r in rules}
+    paths |= {str(r.get("path") or "").lower() for r in rules}
+    for row in dict_rows:
+        for key in row.keys():
+            key_s = str(key)
+            if key_s.lower() in paths or _column_tail(key_s) in paths:
+                return True
+    return False
 
 
 def apply_rules_to_results(
     results: dict[str, Any] | None,
     rules: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
-    """Filter captured SQL rows to the active map/table dashboard filters."""
+    """Keep only rows that match active filters (what the frontend would show).
+
+    - Strict column path match (no 'any cell equals value').
+    - Bulky sources without matching columns → rows cleared (not leaked).
+    - Singleton KPI rows without matching columns may passthrough.
+    """
     results = {k: dict(v or {}) for k, v in dict(results or {}).items()}
     rules = list(rules or [])
     if not rules:
@@ -293,24 +388,28 @@ def apply_rules_to_results(
         if not dict_rows:
             out[name] = payload
             continue
-        # If none of the columns relate to any rule path and no cell equals
-        # values, leave source as-is (KPI without region column).
-        paths = {_column_tail(r.get("path")) for r in rules}
-        has_path_col = any(_column_tail(k) in paths for r in dict_rows for k in r.keys())
-        has_value_hit = any(
-            any(_norm(cell) == _norm(rule.get("value")) for cell in r.values())
-            for r in dict_rows
-            for rule in rules
-        )
-        if not has_path_col and not has_value_hit:
-            out[name] = payload
+        if not _source_has_rule_columns(dict_rows, rules):
+            new_payload = dict(payload)
+            if len(dict_rows) <= 1:
+                # single aggregate KPI — keep, mark passthrough
+                new_payload["filter_scope"] = "passthrough_singleton"
+            else:
+                new_payload["rows"] = []
+                new_payload["row_count"] = 0
+                new_payload["row_count_unfiltered"] = len(rows)
+                new_payload["omitted"] = "no_column_for_active_filters"
+                new_payload["filtered_by"] = rules
+            out[name] = new_payload
             continue
-        kept = [r for r in rows if isinstance(r, dict) and all(
-            _row_matches_rule(r, rule) for rule in rules
-        )]
+        kept = [
+            r
+            for r in rows
+            if isinstance(r, dict) and all(_row_matches_rule(r, rule) for rule in rules)
+        ]
         new_payload = dict(payload)
         new_payload["rows"] = kept
         new_payload["row_count"] = len(kept)
+        new_payload["row_count_unfiltered"] = len(rows)
         new_payload["filtered_by"] = rules
         out[name] = new_payload
     return out
@@ -324,23 +423,14 @@ def build_llm_pack(
     meta: dict[str, Any] | None = None,
     apply_dashboard_filters: bool = True,
     drill_stack: list[list[dict[str, Any]]] | None = None,
+    apply_filters: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     interaction = enrich_interaction(interaction)
     event_rules = extract_dashboard_filter_rules(interaction)
-    stacked = [rule for level in list(drill_stack or []) for rule in level]
-    # Prefer full drill stack (all levels); fall back to this event's rules
-    # (Apply Filter without element drill-down).
-    rules = stacked or event_rules
-    # de-dupe while preserving order
-    seen: set[tuple[str, str]] = set()
-    uniq: list[dict[str, Any]] = []
-    for rule in rules:
-        key = (str(rule.get("path")), _norm(rule.get("value")))
-        if key in seen:
-            continue
-        seen.add(key)
-        uniq.append(rule)
-    rules = uniq
+    stacked = _flatten_stack(list(drill_stack or []))
+    applied = list(apply_filters or [])
+    # Combine Apply-Filter + all drill levels; fall back to this event only
+    rules = _dedupe_rules(applied + stacked) or event_rules
     raw_results = dict(results or {})
     view_results = (
         apply_rules_to_results(raw_results, rules)
@@ -357,6 +447,8 @@ def build_llm_pack(
     if drill_stack:
         pack["drill_level"] = len(drill_stack)
         pack["drill_stack"] = list(drill_stack)
+    if apply_filters:
+        pack["apply_filters"] = list(apply_filters)
     if meta is not None:
         pack["meta"] = dict(meta)
     return json_safe(pack)

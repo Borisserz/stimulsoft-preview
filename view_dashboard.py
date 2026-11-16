@@ -56,7 +56,7 @@ from llm_pack import (
     is_real_filter_key,
     sanitize_filters,
     snapshot_from_data_args,
-    update_drill_stack,
+    update_filter_state,
 )
 
 ROOT = Path(__file__).resolve().parent
@@ -153,6 +153,8 @@ _APPLIED_LOG_MAX = 100
 _PENDING_APPLY: dict[str, dict[str, Any]] = {}
 # region drill-in levels (DashboardElementDrillDown / DrillUp)
 _DRILL_STACK: list[list[dict[str, Any]]] = []
+# Apply-Filter from map/table/list clicks (DashboardFiltering)
+_APPLY_FILTERS: list[dict[str, Any]] = []
 
 
 def _now_stamp() -> str:
@@ -201,7 +203,7 @@ def params_snapshot() -> dict[str, Any]:
 
 
 def params_update(values: dict[str, Any], *, clear_results_on_change: bool = True) -> dict[str, Any]:
-    global _FILTERS_UPDATED_AT, _FILTER_GEN
+    global _FILTERS_UPDATED_AT, _FILTER_GEN, _DRILL_STACK, _APPLY_FILTERS
     with _params_lock:
         real_changed = False
         for key, value in values.items():
@@ -227,6 +229,9 @@ def params_update(values: dict[str, Any], *, clear_results_on_change: bool = Tru
                 # иначе в pack торчат старые rows (типа 2026-01-01) до нового пересчёта
                 _RESULTS.clear()
                 _PENDING_APPLY.clear()
+                # Year/Month change invalidates map drill / apply-filter state
+                _DRILL_STACK = []
+                _APPLY_FILTERS = []
         return dict(_PARAMS)
 
 
@@ -366,11 +371,13 @@ def llm_pack_snapshot() -> dict[str, Any]:
             interaction=_LAST_INTERACTION,
             results={k: dict(v) for k, v in _RESULTS.items()},
             drill_stack=list(_DRILL_STACK),
+            apply_filters=list(_APPLY_FILTERS),
             meta={
                 "filters_updated_at": _FILTERS_UPDATED_AT,
                 "sources": list(_RESULTS.keys()),
                 "applied_log_len": len(_APPLIED_LOG),
                 "drill_level": len(_DRILL_STACK),
+                "apply_filter_count": len(_APPLY_FILTERS),
             },
         )
 
@@ -474,14 +481,17 @@ def sti_response(component, inject_debug: bool = False):
 
 
 def remember_interaction(dump: Any) -> None:
-    global _LAST_INTERACTION, _DRILL_STACK
+    global _LAST_INTERACTION, _DRILL_STACK, _APPLY_FILTERS
     if not isinstance(dump, dict):
         dump = {"raw": dump}
     dump = enrich_interaction(dump) or dump
     with _params_lock:
-        _DRILL_STACK, flat = update_drill_stack(_DRILL_STACK, dump)
+        _APPLY_FILTERS, _DRILL_STACK, flat = update_filter_state(
+            _APPLY_FILTERS, _DRILL_STACK, dump
+        )
         dump = dict(dump)
         dump["drill_level"] = len(_DRILL_STACK)
+        dump["apply_filter_count"] = len(_APPLY_FILTERS)
         if flat:
             dump["dashboard_filters"] = flat
         _LAST_INTERACTION = dump
@@ -494,7 +504,8 @@ def remember_interaction(dump: Any) -> None:
     rules = dump.get("dashboard_filters") or []
     print(
         f"[interaction] action={action!r} button={button!r} "
-        f"drill_level={dump.get('drill_level')} filters={len(rules)} "
+        f"drill_level={dump.get('drill_level')} "
+        f"apply={dump.get('apply_filter_count')} filters={len(rules)} "
         f"keys={dump.get('__keys')}",
         flush=True,
     )
@@ -600,7 +611,7 @@ def post_params():
 
 @app.delete("/api/params")
 def clear_params():
-    global _LAST_INTERACTION, _FILTERS_UPDATED_AT, _FILTER_GEN, _DRILL_STACK
+    global _LAST_INTERACTION, _FILTERS_UPDATED_AT, _FILTER_GEN, _DRILL_STACK, _APPLY_FILTERS
     with _params_lock:
         _PARAMS.clear()
         _LAST_INTERACTION = None
@@ -609,6 +620,7 @@ def clear_params():
         _APPLIED_LOG.clear()
         _PENDING_APPLY.clear()
         _DRILL_STACK = []
+        _APPLY_FILTERS = []
         _FILTERS_UPDATED_AT = None
         _FILTER_GEN += 1
     return jsonify({"ok": True, "params": {}, "llm_pack": llm_pack_snapshot()})

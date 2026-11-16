@@ -135,9 +135,9 @@ class ApplyRulesTests(unittest.TestCase):
             filtered["dashboardReportsPaymentsRegion"]["rows"][0]["region"],
             "Брестская",
         )
-        # unrelated source without matching column keeps rows if no cell matches? 
-        # policy: keep source unchanged if no column matches any rule path
+        # singleton without matching column may passthrough; multi-row noise is cleared
         self.assertEqual(filtered["other"]["row_count"], 1)
+        self.assertEqual(filtered["other"].get("filter_scope"), "passthrough_singleton")
 
 if __name__ == "__main__":
     unittest.main()
