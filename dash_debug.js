@@ -363,12 +363,12 @@
     head.style.cssText =
       "display:flex;align-items:center;gap:8px;padding:8px 10px;background:#111827;border-bottom:1px solid #334155;flex-wrap:wrap;";
     head.innerHTML =
-      '<strong style="color:#86efac">llm-pack</strong>' +
+      '<strong style="color:#86efac">SVERKA</strong>' +
       '<span id="dash-interaction-action" style="color:#93c5fd"></span>' +
       '<span id="dash-interaction-meta" style="color:#94a3b8"></span>' +
-      '<span style="margin-left:auto;color:#94a3b8">filters + results</span>' +
-      '<button type="button" id="dash-interaction-refresh" style="background:#1f2937;color:#e2e8f0;border:1px solid #475569;padding:2px 8px;cursor:pointer">refresh</button>' +
-      '<button type="button" id="dash-interaction-verify" style="background:#1f2937;color:#e2e8f0;border:1px solid #475569;padding:2px 8px;cursor:pointer">verify</button>' +
+      '<span style="margin-left:auto"></span>' +
+      '<button type="button" id="dash-interaction-compare" style="background:#166534;color:#ecfdf5;border:1px solid #22c55e;padding:3px 10px;cursor:pointer;font-weight:700">SVERKA</button>' +
+      '<button type="button" id="dash-interaction-json" style="background:#1f2937;color:#e2e8f0;border:1px solid #475569;padding:2px 8px;cursor:pointer">JSON</button>' +
       '<button type="button" id="dash-interaction-clear" style="background:#1f2937;color:#e2e8f0;border:1px solid #475569;padding:2px 8px;cursor:pointer">clear</button>' +
       '<button type="button" id="dash-interaction-hide" style="background:#1f2937;color:#e2e8f0;border:1px solid #475569;padding:2px 8px;cursor:pointer">hide</button>';
     var pre = document.createElement("pre");
@@ -376,10 +376,10 @@
     pre.style.cssText =
       "margin:0;padding:10px;overflow:auto;flex:1;white-space:pre-wrap;word-break:break-word;color:#bbf7d0;";
     pre.textContent =
-      "1) Wait for dashboard load.\n" +
-      "2) Press refresh — look for RESULTS DIGEST (names + numbers).\n" +
-      "3) Click map/region/top buttons, wait 1s, refresh again.\n" +
-      "verify = health check only (no table rows). Use refresh for data.";
+      "Zhmi zelenuyu knopku SVERKA.\n" +
+      "Tam: filtry + stroki dlya sravneniya s ekranom.\n" +
+      "NE zhmi staryy verify — eto zhurnal, ne dannye.\n" +
+      "Ili otkroy: http://127.0.0.1:8040/api/compare";
     el.appendChild(head);
     el.appendChild(pre);
     (document.documentElement || document.body).appendChild(el);
@@ -390,55 +390,28 @@
       pre.textContent = "";
       fetch("/api/params", { method: "DELETE" })
         .then(function () {
-          return refreshLlmPack(0);
+          return refreshCompare(0);
         })
         .catch(function () {});
     };
-    document.getElementById("dash-interaction-refresh").onclick = function () {
-      refreshLlmPack(0);
+    document.getElementById("dash-interaction-compare").onclick = function () {
+      refreshCompare(0);
     };
-    document.getElementById("dash-interaction-verify").onclick = function () {
-      refreshVerify(0);
+    document.getElementById("dash-interaction-json").onclick = function () {
+      refreshLlmPack(0);
     };
     return el;
   }
 
-  function buildDigestText(pack) {
-    if (!pack || !pack.results || typeof pack.results !== "object") {
-      return "NO RESULTS in this payload.\nIf you pressed verify — press refresh instead.\n";
-    }
-    var keys = Object.keys(pack.results);
-    if (!keys.length) {
-      return "NO RESULTS YET — wait for queries, then refresh.\n";
-    }
-    var lines = ["=== RESULTS (current filters only) ==="];
-    if (pack.dashboard_filters && pack.dashboard_filters.length) {
-      lines.push("active_filters=" + JSON.stringify(pack.dashboard_filters));
-    }
-    if (typeof pack.drill_level === "number") {
-      lines.push("drill_level=" + pack.drill_level);
-    }
-    if (!keys.length) {
-      lines.push("(empty — no rows for current filters)");
-    }
-    keys.sort().forEach(function (name) {
-      var r = pack.results[name] || {};
-      var rows = Array.isArray(r.rows) ? r.rows : [];
-      var rc = typeof r.row_count === "number" ? r.row_count : rows.length;
-      lines.push("- " + name + ": row_count=" + rc);
-      rows.slice(0, 5).forEach(function (row, i) {
-        try {
-          lines.push("    [" + i + "] " + JSON.stringify(row));
-        } catch (e) {
-          lines.push("    [" + i + "] " + String(row));
-        }
-      });
-      if (rows.length > 5) {
-        lines.push("    ... +" + (rows.length - 5) + " more");
-      }
-    });
-    lines.push("=== FULL PACK JSON below ===");
-    return lines.join("\n") + "\n";
+  function showText(text, label) {
+    var el = ensurePanel();
+    el.style.display = "flex";
+    var actionEl = document.getElementById("dash-interaction-action");
+    var metaEl = document.getElementById("dash-interaction-meta");
+    if (actionEl) actionEl.textContent = label || "SVERKA";
+    if (metaEl) metaEl.textContent = "sravni s frontom";
+    var pre = document.getElementById("dash-interaction-pre");
+    if (pre) pre.textContent = text;
   }
 
   function showPack(pack, mode) {
@@ -452,10 +425,10 @@
       (pack && typeof pack.ok === "boolean" && !pack.results);
     if (actionEl) {
       if (isVerify) {
-        actionEl.textContent = pack && pack.ok ? "VERIFY OK" : "VERIFY FAIL";
+        actionEl.textContent = "NE DANNYE";
       } else {
         actionEl.textContent =
-          (inter && (inter.action || inter.event)) || "(pack)";
+          (inter && (inter.action || inter.event)) || "JSON";
       }
     }
     if (metaEl) {
@@ -468,36 +441,23 @@
           var r = pack.results[k];
           if (r && typeof r.row_count === "number") nRows += r.row_count;
         });
-      } else if (pack && Array.isArray(pack.sources)) {
-        nResults = pack.sources.length;
-        if (pack.result_meta) {
-          Object.keys(pack.result_meta).forEach(function (k) {
-            var r = pack.result_meta[k];
-            if (r && typeof r.row_count === "number") nRows += r.row_count;
-          });
-        }
       }
-      var okBit =
-        pack && typeof pack.ok === "boolean" ? " ok=" + pack.ok : "";
       metaEl.textContent =
-        "filters=" +
-        nFilters +
-        " sources=" +
-        nResults +
-        " rows=" +
-        nRows +
-        okBit;
+        "filters=" + nFilters + " sources=" + nResults + " rows=" + nRows;
     }
     var pre = document.getElementById("dash-interaction-pre");
     if (pre) {
       try {
         if (isVerify) {
           pre.textContent =
-            "VERIFY has no table rows.\nPress refresh to see payment names/numbers.\n\n" +
-            JSON.stringify(pack, null, 2);
+            "ETO VERIFY — NE DANNYE DLYA SVERKI.\n" +
+            "Zhmi zelenuyu SVERKA ili otkroy /api/compare\n\n" +
+            "ok=" +
+            (pack && pack.ok) +
+            "\nissues=" +
+            JSON.stringify((pack && pack.issues) || []);
         } else {
-          pre.textContent =
-            buildDigestText(pack) + JSON.stringify(pack, null, 2);
+          pre.textContent = JSON.stringify(pack, null, 2);
         }
       } catch (e) {
         pre.textContent = String(pack);
@@ -534,6 +494,23 @@
       });
   }
 
+  function refreshCompare(delayMs) {
+    if (llmPackTimer) clearTimeout(llmPackTimer);
+    llmPackTimer = setTimeout(function () {
+      fetch("/api/compare", { cache: "no-store" })
+        .then(function (r) {
+          return r.text();
+        })
+        .then(function (text) {
+          showText(text, "SVERKA");
+          if (window.console && console.log) console.log("[compare]", text);
+        })
+        .catch(function (e) {
+          showText(String(e), "ERROR");
+        });
+    }, typeof delayMs === "number" ? delayMs : 0);
+  }
+
   function refreshLlmPack(delayMs) {
     if (llmPackTimer) clearTimeout(llmPackTimer);
     llmPackTimer = setTimeout(function () {
@@ -544,40 +521,26 @@
     }, typeof delayMs === "number" ? delayMs : 600);
   }
 
-  function refreshVerify(delayMs) {
-    if (llmPackTimer) clearTimeout(llmPackTimer);
-    llmPackTimer = setTimeout(function () {
-      fetchJson("/api/verify", function (rep) {
-        showPack(rep, "verify");
-        if (window.console && console.log) console.log("[verify]", rep);
-      });
-    }, typeof delayMs === "number" ? delayMs : 0);
-  }
-
   function refreshAfterInteraction(action) {
-    // Map filter / element drill-in are mostly client-side — poll for pack.
-    // Buttons / dashboard drill-down often re-query SQL.
-    // IMPORTANT: do NOT call refreshLlmPack in a loop — it clears the timer
-    // and only the last delay would fire.
-    var delays = [500, 1200, 2400];
-    if (action === "DashboardButtonElementApplyEvents") {
-      delays = [600, 1400, 2600];
-    } else if (
+    // After click — show human SVERKA text (not verify log).
+    var delays = [500, 1400, 2600];
+    if (
       action === "DashboardElementDrillDown" ||
       action === "DashboardElementDrillUp" ||
-      action === "DashboardDrillDown" ||
-      action === "DrillDown"
+      action === "DashboardDrillDown"
     ) {
-      delays = [400, 1000, 2000, 3200];
-    } else if (action === "DashboardFiltering") {
-      delays = [400, 1200, 2200];
+      delays = [400, 1200, 2400, 3600];
     }
     delays.forEach(function (ms) {
       setTimeout(function () {
-        fetchJson("/api/llm-pack", function (pack) {
-          showPack(pack, "pack");
-          if (window.console && console.log) console.log("[llm-pack]", pack);
-        });
+        fetch("/api/compare", { cache: "no-store" })
+          .then(function (r) {
+            return r.text();
+          })
+          .then(function (text) {
+            showText(text, "SVERKA");
+          })
+          .catch(function () {});
       }, ms);
     });
   }
@@ -618,10 +581,10 @@
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", function () {
       ensurePanel();
-      refreshLlmPack(1500);
+      refreshCompare(1500);
     });
   } else {
     ensurePanel();
-    refreshLlmPack(1500);
+    refreshCompare(1500);
   }
 })();

@@ -48,6 +48,7 @@ from stimulsoft_reports.report.enums.StiVariableType import StiVariableType
 from stimulsoft_reports.viewer import StiViewer
 
 from llm_pack import (
+    build_compare_text,
     build_llm_pack,
     build_results_digest,
     build_verify_report,
@@ -576,15 +577,23 @@ def get_llm_pack():
 
 @app.get("/api/llm-pack-digest")
 def get_llm_pack_digest():
-    """Короткий текст: имена датасорсов + первые строки (цифры/названия как на фронте)."""
-    with _params_lock:
-        text = build_results_digest(_RESULTS, max_rows_per_source=8)
+    """Короткий текст по УЖЕ отфильтрованному pack (не сырой SQL)."""
+    text = build_results_digest(
+        llm_pack_snapshot().get("results") or {}, max_rows_per_source=8
+    )
+    return Response(text.encode("utf-8"), content_type="text/plain; charset=utf-8")
+
+
+@app.get("/api/compare")
+def get_compare():
+    """Человекочитаемая сверка с фронтом: фильтры + реальные строки. Без verify-журнала."""
+    text = build_compare_text(llm_pack_snapshot(), max_rows=15)
     return Response(text.encode("utf-8"), content_type="text/plain; charset=utf-8")
 
 
 @app.get("/api/verify")
 def get_verify():
-    """Сверка: filters в store vs params, реально ушедшие в запросы, vs свежесть results."""
+    """Техпроверка свежести SQL (НЕ данные для сверки с экраном)."""
     body = dumps_llm_pack(verify_snapshot())
     return Response(body.encode("utf-8"), content_type="application/json; charset=utf-8")
 

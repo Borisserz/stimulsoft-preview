@@ -67,7 +67,7 @@ def build_results_digest(
     if not results:
         return (
             "NO DATA for current filters.\n"
-            "Click map/region/button, wait, press refresh.\n"
+            "Click map/region/button, wait, press SVERKA.\n"
             "Pack contains only rows matching active filters."
         )
     lines: list[str] = ["RESULTS (current filters only — nothing else):"]
@@ -80,6 +80,76 @@ def build_results_digest(
             lines.append(f"    [{i}] {json.dumps(json_safe(row), ensure_ascii=False)}")
         if len(rows) > max_rows_per_source:
             lines.append(f"    ... +{len(rows) - max_rows_per_source} more rows")
+    return "\n".join(lines)
+
+
+def build_compare_text(pack: dict[str, Any] | None, *, max_rows: int = 12) -> str:
+    """Plain text for human check against the dashboard screen. No verify junk."""
+    pack = dict(pack or {})
+    lines: list[str] = []
+    lines.append("========== SVERKA S FRONTOM ==========")
+    lines.append("Sravni cifry/nazvaniya s tem, chto na ekrane.")
+    lines.append("NE smotri verify — tam zhurnal zaprosov, ne dannye.")
+    lines.append("")
+
+    filters = dict(pack.get("filters") or {})
+    lines.append("1) FILTRY PANELI (Year/Month/кнопки):")
+    if filters:
+        for k in sorted(filters.keys()):
+            lines.append(f"   {k} = {filters[k]}")
+    else:
+        lines.append("   (pusto)")
+
+    dash = list(pack.get("dashboard_filters") or [])
+    lines.append("")
+    lines.append("2) FILTRY KARTY / DRILL (region i t.d.):")
+    if dash:
+        for rule in dash:
+            lines.append(
+                f"   {rule.get('path')} = {rule.get('value')}"
+                f"  ({rule.get('condition') or 'equalTo'})"
+            )
+    else:
+        lines.append("   (net — pokazany vse SQL-stroki bez region-filtra)")
+
+    inter = dict(pack.get("interaction") or {})
+    lines.append("")
+    lines.append("3) POSLEDNIY KLIK:")
+    lines.append(f"   action = {inter.get('action') or '-'}")
+    if inter.get("button"):
+        lines.append(f"   button = {inter.get('button')}")
+    if inter.get("element"):
+        lines.append(f"   element = {inter.get('element')}")
+    if pack.get("drill_level") is not None:
+        lines.append(f"   drill_level = {pack.get('drill_level')}")
+
+    results = dict(pack.get("results") or {})
+    lines.append("")
+    lines.append("4) DANNYE (tolko pod filtry — eto i est dlya LLM):")
+    if not results:
+        lines.append("   PUSTO. Na fronte est cifry, a tut net?")
+        lines.append("   -> klikni region/knopku, podozhdi 2s, snova SVERKA.")
+        lines.append("   -> ili path kolonki ne sovpal s SQL (region vs obl_name).")
+    else:
+        total_rows = 0
+        for name in sorted(results.keys()):
+            payload = results.get(name) or {}
+            rows = list(payload.get("rows") or [])
+            rc = int(payload.get("row_count") or len(rows))
+            total_rows += rc
+            lines.append("")
+            lines.append(f"   [{name}]  strok={rc}")
+            for i, row in enumerate(rows[: max(0, max_rows)]):
+                lines.append(f"      {i+1}) {json.dumps(json_safe(row), ensure_ascii=False)}")
+            if len(rows) > max_rows:
+                lines.append(f"      ... eshche {len(rows) - max_rows} strok")
+        lines.append("")
+        lines.append(f"ITOGO istochnikov={len(results)} strok={total_rows}")
+
+    lines.append("")
+    lines.append("======================================")
+    lines.append("Polnyy JSON: knopka JSON ili /api/llm-pack")
+    lines.append("Tekst: /api/compare")
     return "\n".join(lines)
 
 
