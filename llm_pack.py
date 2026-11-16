@@ -139,25 +139,41 @@ def build_compare_text(pack: dict[str, Any] | None, *, max_rows: int = 12) -> st
     results = dict(pack.get("results") or {})
     lines.append("")
     lines.append("4) DANNYE (tolko pod filtry — eto i est dlya LLM):")
+    if not dash:
+        lines.append("   !! FILTRY KARTY PUSTYE — nize VSE stroki SQL-snyamka, ne region.")
+        lines.append("   !! Poetomu chislo ne menyaetsya ot regiona (chasto 50 = lim snyamka).")
     if not results:
         lines.append("   PUSTO. Na fronte est cifry, a tut net?")
         lines.append("   -> klikni region/knopku, podozhdi 2s, snova SVERKA.")
         lines.append("   -> ili path kolonki ne sovpal s SQL (region vs obl_name).")
     else:
         total_rows = 0
+        total_raw = 0
         for name in sorted(results.keys()):
             payload = results.get(name) or {}
             rows = list(payload.get("rows") or [])
             rc = int(payload.get("row_count") or len(rows))
+            raw_rc = int(payload.get("raw_row_count") or rc)
             total_rows += rc
+            total_raw += raw_rc
+            shown = min(len(rows), max(0, max_rows))
             lines.append("")
-            lines.append(f"   [{name}]  strok={rc}")
+            lines.append(
+                f"   [{name}]  posle_filtra={rc}  do_filtra={raw_rc}  "
+                f"pokazano_zdes={shown}"
+            )
             for i, row in enumerate(rows[: max(0, max_rows)]):
                 lines.append(f"      {i+1}) {json.dumps(json_safe(row), ensure_ascii=False)}")
             if len(rows) > max_rows:
-                lines.append(f"      ... eshche {len(rows) - max_rows} strok")
+                lines.append(
+                    f"      ... eshche {len(rows) - max_rows} iz {rc} "
+                    f"(SVERKA pechataet max {max_rows}, eto NE lim tablitsy)"
+                )
         lines.append("")
-        lines.append(f"ITOGO istochnikov={len(results)} strok={total_rows}")
+        lines.append(
+            f"ITOGO istochnikov={len(results)} posle_filtra={total_rows} "
+            f"do_filtra={total_raw}"
+        )
 
     lines.append("")
     lines.append("======================================")
@@ -547,18 +563,25 @@ def _source_has_rule_columns(
 
 
 def _lean_result_payload(
-    payload: dict[str, Any], *, rows: list[Any], rules: list[dict[str, Any]]
+    payload: dict[str, Any],
+    *,
+    rows: list[Any],
+    rules: list[dict[str, Any]],
+    raw_row_count: int | None = None,
 ) -> dict[str, Any]:
     """Only fields the LLM needs — no capture/apply noise."""
     columns = payload.get("columns")
     if not columns and rows and isinstance(rows[0], dict):
         columns = list(rows[0].keys())
-    return {
+    out = {
         "columns": list(columns or []),
         "row_count": len(rows),
         "rows": rows,
         "filtered_by": rules,
     }
+    if raw_row_count is not None:
+        out["raw_row_count"] = int(raw_row_count)
+    return out
 
 
 def _applicable_rules_for_source(
@@ -586,13 +609,15 @@ def apply_rules_to_results(
     results = {k: dict(v or {}) for k, v in dict(results or {}).items()}
     rules = list(rules or [])
     if not rules:
-        # no active filter — still lean the payloads
+        # no active filter — still lean the payloads (mark as unfiltered dump)
         out: dict[str, Any] = {}
         for name, payload in results.items():
             rows = list(payload.get("rows") or [])
             if not rows:
                 continue
-            out[name] = _lean_result_payload(payload, rows=rows, rules=[])
+            out[name] = _lean_result_payload(
+                payload, rows=rows, rules=[], raw_row_count=len(rows)
+            )
         return out
     out = {}
     for name, payload in results.items():
@@ -611,7 +636,9 @@ def apply_rules_to_results(
         ]
         if not kept:
             continue
-        out[name] = _lean_result_payload(payload, rows=kept, rules=applicable)
+        out[name] = _lean_result_payload(
+            payload, rows=kept, rules=applicable, raw_row_count=len(rows)
+        )
     return out
 
 
