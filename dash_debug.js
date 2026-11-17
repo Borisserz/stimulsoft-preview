@@ -1126,6 +1126,10 @@
           ? api.parseHtmlGrid([].concat.apply([], chunks))
           : null;
     if (!parsed || !parsed.row_count) return null;
+    if (typeof api.pruneSparsePivotRows === "function") {
+      parsed = api.pruneSparsePivotRows(parsed);
+    }
+    if (!parsed || !parsed.row_count) return null;
     parsed.capture = "html_grid";
     return parsed;
   }
@@ -1639,24 +1643,12 @@
             node.getAttribute("elementident");
           var val = node.getAttribute("elementvalue");
           if (arg && api.regionFromAttrs) {
-            var groupText = "";
-            if (!val && node.parentNode) {
-              var kids = node.parentNode.childNodes || [];
-              var bits = [];
-              for (var g = 0; g < kids.length; g++) {
-                var kid = kids[g];
-                if (kid === node) continue;
-                var ktag = (kid.tagName || "").toLowerCase();
-                if (ktag === "path" || ktag === "g") continue;
-                var tx = String(kid.textContent || "")
-                  .replace(/\s+/g, " ")
-                  .trim();
-                if (tx && tx.length < 80) bits.push(tx);
-              }
-              groupText = bits.join(" ");
+            // ONLY private elementvalue — parent group text copies Brest 31% onto all paths.
+            var hit = api.regionFromAttrs(arg, val || "");
+            if (hit) {
+              hit.fromValueAttr = !!(val && String(val).replace(/\s/g, ""));
+              fromAttrs.push(hit);
             }
-            var hit = api.regionFromAttrs(arg, val || groupText || "");
-            if (hit) fromAttrs.push(hit);
           }
         }
         if (
@@ -1676,8 +1668,10 @@
     }
     walkRoot(domEl);
     var labeled = api.pairRegionLabels(lines);
+    if (typeof api.sanitizeMapRegions === "function") {
+      return api.sanitizeMapRegions(fromAttrs, labeled);
+    }
     if (typeof api.mergeRegionLists === "function") {
-      // Attr paths define membership; labels only fill empty amount/percent.
       return api.mergeRegionLists(fromAttrs, labeled, {
         allowNew: !fromAttrs.length,
       });

@@ -246,6 +246,110 @@ ok(pinskJoined && pinskJoined.rows[2]["Факт (руб.)"] === "7 220,9", "pins
 
 ok(mod.mapKeyToRu("BY-BR") === "Брестская", "BY-BR");
 ok(mod.isChromeLabel("Cancel") === true, "Cancel chrome");
+ok(mod.mapKeyToRu("MahiliouskaiaVoblasts") === "Могилёвская", "mogilev latin");
+ok(mod.mapKeyToRu("VitsebskaiaVoblasts") === "Витебская", "vitebsk latin");
+
+// Bug: parent SVG group text has Brest 31% — must NOT copy onto every path.
+var polluted = mod.mergeRegionLists(
+  [
+    mod.regionFromAttrs("BrestskaiaVoblasts", "7\u00a0099,31 руб. 31,0 %"),
+    mod.regionFromAttrs(
+      "GomelskayaVoblasts",
+      "7 099,31 руб. 31,0 % Брестская Гомельская Гродненская"
+    ),
+    mod.regionFromAttrs("GrodnenskayaVoblasts", "7 099,31 руб. 31,0 %"),
+  ],
+  [],
+  { allowNew: true }
+);
+// Without sanitize, all would share 31%. regionFromAttrs alone still returns amount;
+// sanitizeMapRegions keeps values only when elementvalue is private to that region.
+var cleaned = mod.sanitizeMapRegions(
+  [
+    {
+      name: "Брестская",
+      amount: "7 099,31 руб.",
+      percent: "31,0 %",
+      value: "7 099,31 руб.",
+      fromValueAttr: true,
+    },
+    {
+      name: "Гомельская",
+      amount: "7 099,31 руб.",
+      percent: "31,0 %",
+      value: "7 099,31 руб.",
+      fromValueAttr: false,
+    },
+    {
+      name: "Гродненская",
+      amount: "7 099,31 руб.",
+      percent: "31,0 %",
+      value: "7 099,31 руб.",
+      fromValueAttr: false,
+    },
+    { name: "Минская", amount: null, percent: null, value: null, fromValueAttr: false },
+  ],
+  [
+    { name: "Минск", amount: "23 414,38 руб.", percent: "33,3%", value: "23 414,38 руб." },
+    { name: "Брестская", amount: "7 099,31 руб.", percent: "31,0%", value: "7 099,31 руб." },
+  ]
+);
+ok(regionNamed(cleaned, "Брестская").percent.indexOf("31") >= 0, "brest keeps 31");
+ok(!regionNamed(cleaned, "Гомельская").percent, "gomel no stolen 31 " + JSON.stringify(regionNamed(cleaned, "Гомельская")));
+ok(!regionNamed(cleaned, "Гродненская").amount, "grodno no stolen amount");
+ok(regionNamed(cleaned, "Минск").percent === "33,3%", "minsk from labels");
+
+// Drill table: label table (left) + numeric tables (right) must zip by row.
+var labelTbl = [
+  ["Наименование платежа"],
+  ["Единый налог с ИП"],
+  ["Акцизы на спирт"],
+  ["Итог"],
+];
+var numTbl = [
+  ["Факт (руб.)", "План (руб.)"],
+  ["29 370,1", "168"],
+  ["142 218,4", "56"],
+  ["722 087,2", "979"],
+];
+var zipped = mod.joinPivotHtmlChunks([labelTbl, numTbl]);
+ok(zipped && zipped.row_count === 3, "zip rows " + (zipped && zipped.row_count));
+ok(
+  zipped.rows[0][zipped.columns[0]].indexOf("Единый налог") >= 0,
+  "zip payment name not number " + JSON.stringify(zipped.rows[0])
+);
+var zFact = zipped.columns.filter(function (c) {
+  return c.indexOf("Факт") >= 0;
+})[0];
+ok(zFact && zipped.rows[0][zFact] === "29 370,1", "zip fact " + zFact);
+ok(zipped.rows[2][zFact] === "722 087,2", "zip total");
+// Mis-join where payment col is numeric must lose to a better zip
+var badNumericAsName = {
+  columns: ["Наименование платежа", "ИМНС", "c2"],
+  rows: [
+    { "Наименование платежа": "29 370,1", ИМНС: "168 668,3", c2: "157 741,0" },
+    { "Наименование платежа": "142 218,4", ИМНС: "56 832,4", c2: "1" },
+  ],
+  row_count: 2,
+  capture: "html_grid",
+};
+ok(mod.pivotDataScore(badNumericAsName) < mod.pivotDataScore(zipped), "numeric-as-name loses");
+
+// Drop staggered empty-label junk rows (Pinsk ghost rows)
+var withJunk = {
+  columns: ["Наименование платежа", "c1", "c2", "c3"],
+  rows: [
+    { "Наименование платежа": "Земельный налог", c1: "1 027,2", c2: "2 881,7", c3: "" },
+    { "Наименование платежа": "", c1: "", c2: "", c3: "2 549,7" },
+    { "Наименование платежа": "Итог", c1: "7 220,9", c2: "9 797,2", c3: "" },
+  ],
+  row_count: 3,
+  capture: "html_grid",
+};
+var pruned = mod.pruneSparsePivotRows(withJunk);
+ok(pruned.row_count === 2, "pruned junk " + pruned.row_count);
+ok(pruned.rows[1]["Наименование платежа"] === "Итог", "kept total");
+ok(polluted.length >= 1, "polluted fixture used");
 ok(mod.mapKeyToRu("GomelskayaVoblasts") === "Гомельская", "gomel");
 
 ok(mod.isChromeLabel("Close") === true, "Close is chrome");

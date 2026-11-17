@@ -362,8 +362,18 @@
     if (low.indexOf("brest") >= 0) return "Брестская";
     if (low.indexOf("gomel") >= 0 || low.indexOf("homel") >= 0) return "Гомельская";
     if (low.indexOf("grodn") >= 0 || low.indexOf("hrodn") >= 0) return "Гродненская";
-    if (low.indexOf("mogil") >= 0 || low.indexOf("mahile") >= 0) return "Могилёвская";
-    if (low.indexOf("viteb") >= 0 || low.indexOf("vicieb") >= 0) return "Витебская";
+    if (
+      low.indexOf("mogil") >= 0 ||
+      low.indexOf("mahile") >= 0 ||
+      low.indexOf("mahilio") >= 0
+    )
+      return "Могилёвская";
+    if (
+      low.indexOf("viteb") >= 0 ||
+      low.indexOf("vicieb") >= 0 ||
+      low.indexOf("vitseb") >= 0
+    )
+      return "Витебская";
     if (low === "minsk") return "Минск";
     return t;
   }
@@ -578,28 +588,134 @@
     };
   }
 
+  function chunkWidth(rows) {
+    var max = 0;
+    for (var r = 0; r < (rows || []).length; r++) {
+      var w = expandCells(rows[r]).length;
+      if (w > max) max = w;
+    }
+    return max;
+  }
+
+  function isLabelBodyChunk(rows) {
+    if (!rows || rows.length < 2) return false;
+    if (chunkWidth(rows) > 3) return false;
+    var nums = chunkNumericRows(rows);
+    var total = rows.length;
+    return nums * 2 < total;
+  }
+
+  function isNumericBodyChunk(rows) {
+    if (!rows || rows.length < 2) return false;
+    return chunkNumericRows(rows) >= Math.max(1, Math.floor(rows.length / 2));
+  }
+
+  /** Zip left label table with right numeric table by row index. */
+  function zipLabelValueChunks(labelChunk, valueChunk) {
+    if (!labelChunk || !valueChunk) return null;
+    var labelHeaderEnd = 0;
+    for (; labelHeaderEnd < labelChunk.length; labelHeaderEnd++) {
+      if (countNums(expandCells(labelChunk[labelHeaderEnd])) >= 1) break;
+      var cells = expandCells(labelChunk[labelHeaderEnd]);
+      var paymentish = 0;
+      var nonEmpty = 0;
+      for (var i = 0; i < cells.length; i++) {
+        if (!cells[i] || isChromeLabel(cells[i])) continue;
+        nonEmpty++;
+        if (looksLikePaymentHeader(cells[i])) paymentish++;
+      }
+      // first body-like payment row ends headers
+      if (labelHeaderEnd > 0 && nonEmpty && paymentish === nonEmpty) break;
+      if (
+        labelHeaderEnd > 0 &&
+        nonEmpty &&
+        !/наименование|имнс|управлен|регион|сводная/i.test(cells.join(" "))
+      )
+        break;
+    }
+    if (labelHeaderEnd < 1) labelHeaderEnd = 1;
+
+    var valueHeaderEnd = 0;
+    for (; valueHeaderEnd < valueChunk.length; valueHeaderEnd++) {
+      if (countNums(expandCells(valueChunk[valueHeaderEnd])) >= 1) break;
+    }
+    if (valueHeaderEnd < 1) valueHeaderEnd = 1;
+
+    var labelBody = labelChunk.slice(labelHeaderEnd);
+    var valueBody = valueChunk.slice(valueHeaderEnd);
+    var n = Math.min(labelBody.length, valueBody.length);
+    if (n < 1) return null;
+
+    var headerRows = [];
+    var maxH = Math.max(labelHeaderEnd, valueHeaderEnd);
+    for (var h = 0; h < maxH; h++) {
+      var left = h < labelHeaderEnd ? labelChunk[h] : [];
+      var right = h < valueHeaderEnd ? valueChunk[h] : [];
+      // pad left to label width
+      var lw = chunkWidth(labelChunk);
+      var leftExp = expandCells(left);
+      while (leftExp.length < lw) leftExp.push("");
+      headerRows.push(
+        leftExp
+          .map(function (t) {
+            return { text: t, colspan: 1 };
+          })
+          .concat(
+            expandCells(right).map(function (t) {
+              return { text: t, colspan: 1 };
+            })
+          )
+      );
+    }
+    var bodyRows = [];
+    for (var r = 0; r < n; r++) {
+      var lw2 = chunkWidth(labelChunk);
+      var leftB = expandCells(labelBody[r]);
+      while (leftB.length < lw2) leftB.push("");
+      bodyRows.push(
+        leftB
+          .map(function (t) {
+            return { text: t, colspan: 1 };
+          })
+          .concat(
+            expandCells(valueBody[r]).map(function (t) {
+              return { text: t, colspan: 1 };
+            })
+          )
+      );
+    }
+    return parseHtmlGrid(headerRows.concat(bodyRows));
+  }
+
   /**
    * Stimulsoft paints header / body / footer as separate <table>s.
-   * Blind vertical concat turns payment rows into column names.
-   * Keep header-like chunks (no numbers) above the best body chunk only.
+   * Left frozen labels + right numeric grids must be zipped by row, not stacked.
    */
   function joinPivotHtmlChunks(chunks) {
     if (!Array.isArray(chunks) || !chunks.length) return null;
     var headers = [];
-    var bodies = [];
+    var labelBodies = [];
+    var numBodies = [];
+    var otherBodies = [];
     for (var i = 0; i < chunks.length; i++) {
       var ch = chunks[i];
       if (!ch || !ch.length) continue;
-      if (chunkNumericRows(ch) < 1) headers.push(ch);
-      else bodies.push(ch);
+      if (chunkNumericRows(ch) < 1) {
+        if (chunkWidth(ch) <= 3 && ch.length >= 3) labelBodies.push(ch);
+        else headers.push(ch);
+        continue;
+      }
+      if (isLabelBodyChunk(ch)) labelBodies.push(ch);
+      else if (isNumericBodyChunk(ch)) numBodies.push(ch);
+      else otherBodies.push(ch);
     }
     var best = null;
     var bestScore = -1;
-    function consider(rows) {
-      var parsed = parseHtmlGrid(rows);
+    function consider(parsed) {
+      if (!parsed || !parsed.row_count) return;
+      parsed = pruneSparsePivotRows(parsed);
       if (!parsed || !parsed.row_count) return;
       var sc = pivotDataScore(parsed);
-      // Prefer real budget headers over smashed payment-name columns
       for (var c = 0; c < (parsed.columns || []).length; c++) {
         if (looksLikePaymentHeader(parsed.columns[c])) sc -= 50;
       }
@@ -608,34 +724,57 @@
         bestScore = sc;
       }
     }
-    for (var b = 0; b < bodies.length; b++) {
-      consider(bodies[b]);
-      for (var h = 0; h < headers.length; h++) {
-        consider(headers[h].concat(bodies[b]));
-      }
-      if (headers.length > 1) {
-        var allH = [];
-        for (var hh = 0; hh < headers.length; hh++) allH = allH.concat(headers[hh]);
-        // Only title/header tables that are wide enough — skip label-only skinny tables
-        var wideH = headers.filter(function (hdr) {
-          var max = 0;
-          for (var r = 0; r < hdr.length; r++) {
-            var w = expandCells(hdr[r]).filter(function (t) {
-              return t && !isChromeLabel(t);
-            }).length;
-            if (w > max) max = w;
-          }
-          return max >= 2;
-        });
-        if (wideH.length) {
-          var mergedH = [];
-          for (var m = 0; m < wideH.length; m++) mergedH = mergedH.concat(wideH[m]);
-          consider(mergedH.concat(bodies[b]));
+    function considerRows(rows) {
+      consider(parseHtmlGrid(rows));
+    }
+
+    // Horizontal zip: each label table × each numeric table
+    for (var lb = 0; lb < labelBodies.length; lb++) {
+      for (var nb = 0; nb < numBodies.length; nb++) {
+        consider(zipLabelValueChunks(labelBodies[lb], numBodies[nb]));
+        for (var h0 = 0; h0 < headers.length; h0++) {
+          var z = zipLabelValueChunks(labelBodies[lb], numBodies[nb]);
+          if (z) consider(z);
+          considerRows(headers[h0].concat(numBodies[nb]));
         }
       }
     }
-    if (!bodies.length) consider([].concat.apply([], chunks));
+
+    var bodies = numBodies.concat(otherBodies);
+    for (var b = 0; b < bodies.length; b++) {
+      considerRows(bodies[b]);
+      for (var h = 0; h < headers.length; h++) {
+        considerRows(headers[h].concat(bodies[b]));
+      }
+      for (var l = 0; l < labelBodies.length; l++) {
+        consider(zipLabelValueChunks(labelBodies[l], bodies[b]));
+      }
+    }
+    if (!bodies.length && labelBodies.length) {
+      for (var x = 0; x < labelBodies.length; x++) considerRows(labelBodies[x]);
+    }
+    if (!best) considerRows([].concat.apply([], chunks));
     return bestScore > 0 ? best : null;
+  }
+
+  function firstLabelColumn(parsed) {
+    if (!parsed || !parsed.columns || !parsed.columns.length) return null;
+    return parsed.columns[0];
+  }
+
+  /** True when «Наименование платежа» is filled with 29 370,1 — columns shifted. */
+  function labelColumnLooksNumeric(parsed) {
+    var col = firstLabelColumn(parsed);
+    if (!col || !parsed.rows || !parsed.rows.length) return false;
+    var nums = 0;
+    var texts = 0;
+    for (var i = 0; i < parsed.rows.length; i++) {
+      var v = parsed.rows[i][col];
+      if (!v) continue;
+      if (looksNumericLabel(v) || isPercentLabel(v)) nums++;
+      else if (!isTotalWord(v)) texts++;
+    }
+    return nums >= 2 && nums > texts;
   }
 
   /** Non-zero painted numbers. Total/Итог with 0,0 scores 0. */
@@ -659,7 +798,63 @@
       if (nonzero > 0) score += 10 + nonzero;
       else if (label) score += 1;
     }
+    if (labelColumnLooksNumeric(parsed)) score -= 200;
+    for (var c = 0; c < (parsed.columns || []).length; c++) {
+      if (/^c\d+$/.test(String(parsed.columns[c]))) score -= 5;
+    }
     return score;
+  }
+
+  /** Drop ghost rows: empty payment name with only late cN values. */
+  function pruneSparsePivotRows(parsed) {
+    if (!parsed || !Array.isArray(parsed.rows)) return parsed;
+    var col = firstLabelColumn(parsed);
+    if (!col) return parsed;
+    var rows = parsed.rows.filter(function (row) {
+      if (!row) return false;
+      var label = row[col];
+      if (label) return true;
+      var filled = 0;
+      Object.keys(row).forEach(function (k) {
+        if (row[k]) filled++;
+      });
+      return filled === 0 ? false : filled >= 3 && !!row[col];
+    });
+    // Keep rows that have a label OR look like a full numeric line with many cells
+    rows = parsed.rows.filter(function (row) {
+      if (!row) return false;
+      if (row[col]) return true;
+      return false;
+    });
+    return {
+      columns: parsed.columns,
+      rows: rows,
+      row_count: rows.length,
+      capture: parsed.capture || "html_grid",
+    };
+  }
+
+  /**
+   * Paths without private elementvalue must not inherit Brest 31% from SVG group text.
+   * Labels fill holes for regions that still have no amount/percent.
+   */
+  function sanitizeMapRegions(fromAttrs, fromLabels) {
+    var primary = (fromAttrs || []).map(function (r) {
+      if (!r) return null;
+      var out = {
+        name: r.name,
+        amount: r.fromValueAttr ? r.amount : null,
+        percent: r.fromValueAttr ? r.percent : null,
+        value: r.fromValueAttr ? r.value : null,
+      };
+      if (!r.fromValueAttr) {
+        out.amount = null;
+        out.percent = null;
+        out.value = null;
+      }
+      return out;
+    }).filter(Boolean);
+    return mergeRegionLists(primary, fromLabels || [], { allowNew: true });
   }
 
   function pickPivotSource(list) {
@@ -762,6 +957,8 @@
     parseHtmlGrid: parseHtmlGrid,
     joinPivotHtmlChunks: joinPivotHtmlChunks,
     pivotDataScore: pivotDataScore,
+    pruneSparsePivotRows: pruneSparsePivotRows,
+    sanitizeMapRegions: sanitizeMapRegions,
     pickPivotSource: pickPivotSource,
     mergeRegionLists: mergeRegionLists,
     pairRegionLabels: pairRegionLabels,
