@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from facts_pack import facts_from_viewport
 from llm_pack import dumps_llm_pack, json_safe
 
 
@@ -151,6 +152,7 @@ def build_viewport_pack(viewport: dict[str, Any] | None) -> dict[str, Any]:
         "dashboard_filters": list(vp["filters"].get("dashboard") or []),
         "interaction": vp.get("interaction"),
         "elements": list(vp["elements"]),
+        "facts": facts_from_viewport(vp),
         "results": results,
         "export_debug": list(vp.get("export_debug") or []),
     }

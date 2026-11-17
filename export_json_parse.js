@@ -375,6 +375,13 @@
     )
       return "Витебская";
     if (low === "minsk") return "Минск";
+    if (low.indexOf("брест") >= 0) return "Брестская";
+    if (low.indexOf("гомел") >= 0) return "Гомельская";
+    if (low.indexOf("гродн") >= 0) return "Гродненская";
+    if (low.indexOf("могил") >= 0) return "Могилёвская";
+    if (low.indexOf("витеб") >= 0) return "Витебская";
+    if (low.indexOf("минская") >= 0) return "Минская";
+    if (low === "минск") return "Минск";
     return t;
   }
 

@@ -245,6 +245,7 @@ var pinskJoined = mod.joinPivotHtmlChunks([
 ok(pinskJoined && pinskJoined.rows[2]["Факт (руб.)"] === "7 220,9", "pinsk 7220,9");
 
 ok(mod.mapKeyToRu("BY-BR") === "Брестская", "BY-BR");
+ok(mod.mapKeyToRu("Могилевская") === "Могилёвская", "cyrillic mogilev");
 ok(mod.isChromeLabel("Cancel") === true, "Cancel chrome");
 ok(mod.mapKeyToRu("MahiliouskaiaVoblasts") === "Могилёвская", "mogilev latin");
 ok(mod.mapKeyToRu("VitsebskaiaVoblasts") === "Витебская", "vitebsk latin");

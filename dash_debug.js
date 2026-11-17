@@ -520,8 +520,140 @@
     });
   }
 
+  function atlasWait(ms) {
+    return new Promise(function (resolve) {
+      setTimeout(resolve, ms);
+    });
+  }
+
+  function atlasClick(el) {
+    if (!el) return false;
+    try {
+      el.dispatchEvent(
+        new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window })
+      );
+      el.dispatchEvent(
+        new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window })
+      );
+      el.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true, view: window })
+      );
+    } catch (e) {}
+    try {
+      el.click();
+    } catch (e2) {}
+    return true;
+  }
+
+  function atlasFindMap(re) {
+    var nodes = document.getElementsByTagName("*");
+    for (var i = 0; i < nodes.length; i++) {
+      if (!nodes[i].getAttribute) continue;
+      var arg = nodes[i].getAttribute("elementargument") || "";
+      var ident = nodes[i].getAttribute("elementident") || "";
+      if (re.test(arg) || re.test(ident)) return nodes[i];
+    }
+    return null;
+  }
+
+  function atlasFindText(re) {
+    var nodes = document.querySelectorAll("text, tspan, td, span, div, a");
+    var best = null;
+    var bestLen = 999;
+    for (var i = 0; i < nodes.length; i++) {
+      var t = String(nodes[i].textContent || "").replace(/\s+/g, " ").trim();
+      if (!t || t.length > 80 || !re.test(t)) continue;
+      if (t.length < bestLen) {
+        best = nodes[i];
+        bestLen = t.length;
+      }
+    }
+    return best;
+  }
+
+  /** Open collapsed pivot groups (Stimulsoft cell.changeTotal). */
+  function atlasExpandTables() {
+    var tds = document.getElementsByTagName("td");
+    var n = 0;
+    for (var i = 0; i < tds.length && n < 40; i++) {
+      var cell = tds[i].cell;
+      if (!cell || typeof cell.changeTotal !== "function" || cell.opened) continue;
+      try {
+        cell.changeTotal(true, true);
+        n++;
+      } catch (e) {}
+    }
+    return n;
+  }
+
+  function atlasClickLabeled(re) {
+    var nodes = document.getElementsByTagName("*");
+    var best = null;
+    var bestLen = 999;
+    var bestText = "";
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      var text = "";
+      try {
+        if (el.element && el.element.text) text = String(el.element.text);
+      } catch (e0) {}
+      if (!text) {
+        text = String(el.innerText || el.textContent || "");
+      }
+      text = text.replace(/\s+/g, " ").trim();
+      if (!text || text.length > 60 || !re.test(text)) continue;
+      if (text.length < bestLen) {
+        best = el;
+        bestLen = text.length;
+        bestText = text;
+      }
+    }
+    if (!best) return null;
+    atlasClick(best);
+    return bestText;
+  }
+
+  function atlasButtonShot(collected, label, re, pageMeta) {
+    return atlasWait(300).then(function () {
+      var hit = atlasClickLabeled(re);
+      if (!hit) return null;
+      return atlasWait(2500)
+        .then(function () {
+          atlasExpandTables();
+          return atlasWait(1200);
+        })
+        .then(function () {
+          return captureAtlasPage(label + " [" + hit + "]", "button", pageMeta);
+        })
+        .then(function (rec) {
+          collected.push(rec);
+        });
+    });
+  }
+
+  function atlasDrillShot(collected, label, clicker) {
+    return atlasWait(400)
+      .then(function () {
+        clicker();
+        return atlasWait(3200);
+      })
+      .then(function () {
+        atlasExpandTables();
+        return atlasWait(1600);
+      })
+      .then(function () {
+        return captureAtlasPage(label, "drill", { index: 0, name: label });
+      })
+      .then(function (rec) {
+        collected.push(rec);
+      });
+  }
+
   function runAtlasAuto() {
-    showText("ATLAS: obhod pages...", "ATLAS");
+    showText(
+      "ATLAS: pages, knopki vypolnenie/detalizaciya/procent, potom Brest i Pinsk...",
+      "ATLAS"
+    );
     var pages = listReportPages();
     var chain = Promise.resolve();
     var collected = [];
@@ -537,6 +669,55 @@
           });
         });
       });
+    });
+    var page0 = pages[0] || { index: 0, name: "P6" };
+    var dyn = pages[1] || page0;
+    for (var di = 0; di < pages.length; di++) {
+      if (/динам/i.test(pages[di].name || "")) {
+        dyn = pages[di];
+        break;
+      }
+    }
+    chain = chain.then(function () {
+      return gotoReportPage(page0.index);
+    });
+    chain = chain.then(function () {
+      return atlasClickLabeled(/общие данные/i);
+    });
+    chain = chain.then(function () {
+      return atlasButtonShot(
+        collected,
+        "obshchie vypolnenie",
+        /выполнен/i,
+        page0
+      );
+    });
+    chain = chain.then(function () {
+      return atlasButtonShot(collected, "obshchie detalizaciya", /детализ/i, page0);
+    });
+    chain = chain.then(function () {
+      return atlasDrillShot(collected, "drill Brest", function () {
+        atlasClick(atlasFindMap(/brest|брест/i));
+      });
+    });
+    chain = chain.then(function () {
+      return atlasDrillShot(collected, "drill Pinsk", function () {
+        atlasClick(
+          atlasFindMap(/pinsk|пинск/i) || atlasFindText(/пинск/i)
+        );
+      });
+    });
+    chain = chain.then(function () {
+      return gotoReportPage(dyn.index);
+    });
+    chain = chain.then(function () {
+      return atlasClickLabeled(/^динамика$/i);
+    });
+    chain = chain.then(function () {
+      return atlasButtonShot(collected, "dinamika otklonenie", /отклонен/i, dyn);
+    });
+    chain = chain.then(function () {
+      return atlasButtonShot(collected, "dinamika procent", /процент/i, dyn);
     });
     return chain
       .then(function () {
@@ -1912,6 +2093,9 @@
           out.capture = "map_labels";
           out.text =
             regions
+              .filter(function (r) {
+                return r && (r.amount || r.percent);
+              })
               .map(function (r) {
                 return (
                   r.name +

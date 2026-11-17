@@ -15,6 +15,88 @@ from atlas_pack import (  # noqa: E402
 import view_dashboard as vd  # noqa: E402
 
 
+class FactsTests(unittest.TestCase):
+    def test_only_real_map_numbers_and_table_rows(self) -> None:
+        from facts_pack import facts_from_viewport
+
+        facts = facts_from_viewport(
+            {
+                "filters": {"panel": {"year": 2025, "trendtype": "cumulative"}},
+                "elements": [
+                    {
+                        "name": "RegionMapElement1",
+                        "type": "StiRegionMapElement",
+                        "regions": [
+                            {
+                                "name": "Брестская",
+                                "amount": "7 099,31 руб.",
+                                "percent": "31,0 %",
+                            },
+                            {"name": "Гомельская", "amount": None, "percent": None},
+                            {"name": "Могилевская", "amount": None, "percent": None},
+                            {
+                                "name": "Брестская Брестская7 099",
+                                "amount": "7 099,31 руб.",
+                                "percent": "31,0 %",
+                            },
+                        ],
+                    },
+                    {
+                        "name": "CardsElement2",
+                        "type": "StiCardsElement",
+                        "text": "224 711,64 руб.",
+                    },
+                    {
+                        "name": "IndicatorElement67",
+                        "type": "StiIndicatorElement",
+                        "text": "100%\ue900",
+                    },
+                    {
+                        "name": "PivotTableElement13",
+                        "type": "StiPivotTableElement",
+                        "capture": "pivot_viewer",
+                        "columns": [
+                            "Сводная таблица / Наименование платежа",
+                            "Сводная таблица / Регион",
+                            "Вид бюджета / Консолидированный / Факт (руб.)",
+                        ],
+                        "rows": [
+                            {
+                                "Сводная таблица / Наименование платежа": "НДС",
+                                "Сводная таблица / Регион": "Брестская",
+                                "Вид бюджета / Консолидированный / Факт (руб.)": "29 370,13",
+                            }
+                        ],
+                        "row_count": 1,
+                    },
+                    {
+                        "name": "PivotTableElement6",
+                        "type": "StiPivotTableElement",
+                        "capture": "pivot_pending",
+                        "columns": ["a"],
+                        "rows": [],
+                        "row_count": 0,
+                    },
+                ],
+            }
+        )
+        self.assertEqual(facts["map"]["with_numbers"][0]["name"], "Брестская")
+        self.assertEqual(facts["map"]["with_numbers"][0]["percent"], "31,0 %")
+        self.assertEqual(len(facts["map"]["with_numbers"]), 1)
+        self.assertIn("Гомельская", facts["map"]["names_only"])
+        self.assertIn("Могилёвская", facts["map"]["names_only"])
+        self.assertEqual(facts["kpi"][0]["text"], "100%")
+        self.assertEqual(facts["cards"][0]["text"], "224 711,64 руб.")
+        table = facts["tables"][0]
+        self.assertEqual(table["status"], "ok")
+        self.assertEqual(table["rows"][0]["Регион"], "Брестская")
+        self.assertEqual(
+            table["rows"][0]["Консолидированный / Факт (руб.)"], "29 370,13"
+        )
+        self.assertEqual(facts["tables"][1]["status"], "empty_on_screen")
+        self.assertEqual(facts["tables"][1]["rows"], [])
+
+
 class AtlasPackTests(unittest.TestCase):
     def test_replace_and_append(self) -> None:
         base = apply_atlas_post(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from facts_pack import facts_from_viewport
 from llm_pack import dumps_llm_pack, json_safe
 from structure_pack import structure_from_viewport
 
@@ -70,6 +71,7 @@ def normalize_atlas_page(raw: Any) -> dict[str, Any] | None:
         "filters": {"panel": dict(panel), "dashboard": list(dashboard)},
         "interaction": interaction,
         "structure": structure,
+        "facts": facts_from_viewport(vp if isinstance(vp, dict) else {}),
         "highlights": raw.get("highlights")
         if isinstance(raw.get("highlights"), dict)
         else _highlights_from_structure(structure),
@@ -151,6 +153,44 @@ def build_atlas_text(atlas: dict[str, Any] | None) -> str:
         inter = page.get("interaction") or {}
         if isinstance(inter, dict) and inter.get("action"):
             lines.append(f"   last_action={inter.get('action')}")
+        facts = page.get("facts") if isinstance(page.get("facts"), dict) else {}
+        if facts.get("cards"):
+            lines.append(
+                "   CARDS: "
+                + " | ".join(
+                    f"{c.get('name')}={c.get('text')}" for c in facts["cards"][:8]
+                )
+            )
+        if facts.get("kpi"):
+            lines.append(
+                "   KPI: "
+                + " | ".join(f"{c.get('name')}={c.get('text')}" for c in facts["kpi"][:8])
+            )
+        mp = facts.get("map") if isinstance(facts.get("map"), dict) else {}
+        if mp.get("with_numbers"):
+            bits = []
+            for reg in mp["with_numbers"][:8]:
+                bits.append(
+                    f"{reg.get('name')} {reg.get('amount') or ''} {reg.get('percent') or ''}".strip()
+                )
+            lines.append("   MAP CIFRY: " + " | ".join(bits))
+        if mp.get("names_only"):
+            lines.append(
+                "   MAP BEZ CIFR (kontur, ne vydumyvat'): "
+                + ", ".join(mp["names_only"][:12])
+            )
+        for table in facts.get("tables") or []:
+            lines.append(
+                f"   TABLE {table.get('name')} status={table.get('status')} "
+                f"rows={table.get('row_count')} capture={table.get('capture')}"
+            )
+            if table.get("columns"):
+                lines.append("      columns=" + ", ".join(table["columns"][:12]))
+            for i, row in enumerate((table.get("rows") or [])[:5]):
+                lines.append(f"      {i+1}) {row}")
+            extra = int(table.get("row_count") or 0) - 5
+            if extra > 0:
+                lines.append(f"      ... eshche {extra} strok v JSON /api/atlas")
         hi = page.get("highlights") or {}
         if hi.get("button_texts"):
             lines.append("   buttons: " + " | ".join(hi["button_texts"][:12]))
