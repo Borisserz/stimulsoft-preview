@@ -472,31 +472,184 @@
     return out;
   }
 
+  var lastAtlasHit = null;
+  var lastAtlasNav = null;
+
+  function dashboardButtons() {
+    var jo = findViewerJsObject();
+    var panel = jo && jo.controls && jo.controls.dashboardsPanel;
+    var buttons = panel && panel.buttons;
+    if (!buttons || !buttons.length) return [];
+    var out = [];
+    for (var i = 0; i < buttons.length; i++) {
+      if (!buttons[i].isNestedPage) out.push(buttons[i]);
+    }
+    return out;
+  }
+
+  function dashboardButtonForPage(index) {
+    var buttons = dashboardButtons();
+    for (var i = 0; i < buttons.length; i++) {
+      var rp = buttons[i].reportParams || {};
+      var n = rp.originalPageNumber != null ? rp.originalPageNumber : rp.pageNumber;
+      if (n === index) return buttons[i];
+    }
+    return buttons[index] || null;
+  }
+
+  /** Cards + indicators. Page flips that do not change this key did not change the screen. */
+  function atlasScreenKey() {
+    var bits = [];
+    var nodes = document.getElementsByTagName("*");
+    for (var i = 0; i < nodes.length; i++) {
+      var attrs = nodes[i].elementAttributes;
+      if (!attrs || !attrs.type) continue;
+      var type = String(attrs.type);
+      if (type.indexOf("Cards") < 0 && type.indexOf("Indicator") < 0 && type.indexOf("Map") < 0)
+        continue;
+      var comp = nodes[i].element;
+      var text = comp && comp.text ? String(comp.text) : "";
+      if (!text && type.indexOf("Map") >= 0) {
+        text = String(nodes[i].innerText || "").replace(/\s+/g, " ").trim().slice(0, 80);
+      }
+      if (text) bits.push(String(attrs.name || "") + "=" + text);
+    }
+    bits.sort();
+    return bits.join("|");
+  }
+
+  function atlasWaitStable(ms) {
+    var last = "\0";
+    var stable = 0;
+    var start = Date.now();
+    return new Promise(function tick(resolve) {
+      var key = atlasScreenKey();
+      if (key && key === last) stable++;
+      else stable = 0;
+      last = key;
+      if ((key && stable >= 2) || Date.now() - start >= ms) resolve(key);
+      else setTimeout(function () { tick(resolve); }, 400);
+    });
+  }
+
+  function atlasGeomList() {
+    var all = [];
+    var nodes = document.getElementsByTagName("*");
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i];
+      if (!n.getAttribute) continue;
+      var ident = n.getAttribute("elementident") || "";
+      var arg = n.getAttribute("elementargument") || "";
+      var value = n.getAttribute("elementvalue") || "";
+      if (!ident && !arg && !value) continue;
+      all.push({
+        ident: ident.slice(0, 48),
+        argument: arg.slice(0, 48),
+        value: value.replace(/\s+/g, " ").trim().slice(0, 48),
+        onclick: typeof n.onclick === "function",
+      });
+    }
+    var interesting = [];
+    var rest = [];
+    for (var j = 0; j < all.length; j++) {
+      var blob = all[j].ident + " " + all[j].argument + " " + all[j].value;
+      if (/brest|брест|pinsk|пинск|област/i.test(blob)) interesting.push(all[j]);
+      else rest.push(all[j]);
+    }
+    return interesting.slice(0, 8).concat(rest.slice(0, 6));
+  }
+
+  function atlasProbe() {
+    var jo = findViewerJsObject();
+    var panel = jo && jo.controls && jo.controls.dashboardsPanel;
+    var selected = panel && panel.selectedButton;
+    var buttons = dashboardButtons().map(function (b, i) {
+      var rp = b.reportParams || {};
+      return {
+        i: i,
+        text: String(b.innerText || b.textContent || "")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 40),
+        page: rp.originalPageNumber != null ? rp.originalPageNumber : rp.pageNumber,
+        selected: b === selected,
+      };
+    });
+    var guid = jo && jo.reportParams && jo.reportParams.dashboardDrillDownGuid;
+    return {
+      buttons: buttons,
+      geoms: atlasGeomList(),
+      drill_guid: guid ? String(guid).slice(0, 12) : "net",
+    };
+  }
+
+  function atlasNoteHit(el, via) {
+    lastAtlasHit = {
+      via: via || "none",
+      ident: el && el.getAttribute ? el.getAttribute("elementident") || "" : "",
+      argument: el && el.getAttribute ? el.getAttribute("elementargument") || "" : "",
+      value:
+        el && el.getAttribute
+          ? String(el.getAttribute("elementvalue") || "")
+              .replace(/\s+/g, " ")
+              .trim()
+              .slice(0, 48)
+          : "",
+      onclick: !!(el && typeof el.onclick === "function"),
+    };
+  }
+
+  function atlasTableNotes(vp) {
+    var out = [];
+    var els = (vp && vp.elements) || [];
+    var reasons = {};
+    ((vp && vp.export_debug) || []).forEach(function (row) {
+      if (row && row.name) reasons[row.name] = row.reason || "";
+    });
+    for (var i = 0; i < els.length && out.length < 4; i++) {
+      var el = els[i];
+      if (!el) continue;
+      var type = String(el.type || "");
+      if (type.indexOf("Pivot") < 0 && type.indexOf("Table") < 0) continue;
+      out.push({
+        name: el.name,
+        capture: el.capture || "",
+        rows: el.row_count || 0,
+        reason: reasons[el.name] || "",
+      });
+    }
+    return out;
+  }
+
   function gotoReportPage(index) {
-    return new Promise(function (resolve) {
-      try {
+    var before = atlasScreenKey();
+    var via = "none";
+    var text = "";
+    try {
+      var btn = dashboardButtonForPage(index);
+      if (btn && typeof btn.action === "function") {
+        text = String(btn.innerText || btn.textContent || "")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 40);
+        via = "panel";
+        btn.action();
+      } else {
         var jo = findViewerJsObject();
         if (jo && jo.reportParams) {
           jo.reportParams.pageNumber = index;
-          if (typeof jo.postAction === "function") {
-            try {
-              jo.postAction("GetPages");
-            } catch (e0) {
-              try {
-                jo.postAction("RefreshViewer");
-              } catch (e1) {}
-            }
-          }
+          jo.reportParams.dashboardDrillDownGuid = null;
+          if (typeof jo.postAction === "function") jo.postAction("Refresh");
+          via = "refresh";
         }
-        var report = resolveStiReport();
-        if (report && report.pages && typeof report.pages.getByIndex === "function") {
-          try {
-            var page = report.pages.getByIndex(index);
-            if (page) report.currentPage = page;
-          } catch (e2) {}
-        }
-      } catch (e3) {}
-      setTimeout(resolve, 1800);
+      }
+    } catch (e3) {
+      via = "error";
+    }
+    return atlasWaitStable(5000).then(function (key) {
+      var changed = !before || key !== before || index === 0;
+      lastAtlasNav = { text: text, via: via, changed: changed, page: index };
+      return { changed: changed };
     });
   }
 
@@ -510,6 +663,11 @@
       filters: (vp && vp.filters) || { panel: {}, dashboard: [] },
       interaction: (vp && vp.interaction) || lastInteractionDump,
       viewport: vp,
+      diag: {
+        nav: lastAtlasNav,
+        click: lastAtlasHit,
+        tables: atlasTableNotes(vp),
+      },
     };
   }
 
@@ -590,17 +748,25 @@
       }
     }
     if (!best) best = atlasFindText(re);
-    if (!best) return false;
+    if (!best) {
+      atlasNoteHit(null, "none");
+      return false;
+    }
+    var ident = best.getAttribute && best.getAttribute("elementident");
+    var arg = best.getAttribute && best.getAttribute("elementargument");
+    if (!ident && arg) best.setAttribute("elementident", arg);
     var cur = best;
     for (var up = 0; up < 8 && cur; up++) {
       if (typeof cur.onclick === "function") {
         try {
           cur.onclick.call(cur);
+          atlasNoteHit(cur, "onclick");
           return true;
         } catch (e1) {}
       }
       cur = cur.parentElement || cur.parentNode;
     }
+    atlasNoteHit(best, "click");
     return atlasClick(best);
   }
 
@@ -691,21 +857,20 @@
   }
 
   function atlasDrillShot(collected, label, clicker) {
-    var before = "";
+    var beforeKey = "";
     return atlasWait(500)
       .then(function () {
-        before = (lastInteractionDump && lastInteractionDump.action) || "";
+        beforeKey = atlasScreenKey();
         var hit = clicker();
         return atlasWaitUntil(function () {
-          var action = (lastInteractionDump && lastInteractionDump.action) || "";
-          return hit && /Drill/i.test(action) && action !== before;
-        }, 7000).then(function (drilled) {
+          return hit && atlasScreenKey() !== beforeKey;
+        }, 8000).then(function (drilled) {
           return { hit: hit, drilled: drilled };
         });
       })
       .then(function (res) {
         atlasExpandTables();
-        return atlasWait(1500).then(function () {
+        return atlasWaitStable(4000).then(function () {
           return res;
         });
       })
@@ -725,14 +890,13 @@
     var pages = listReportPages();
     var chain = Promise.resolve();
     var collected = [];
+    var probeBox = null;
     pages.forEach(function (meta) {
       chain = chain.then(function () {
-        return gotoReportPage(meta.index).then(function () {
-          return captureAtlasPage(
-            "page" + meta.index + " " + meta.name,
-            "auto_page",
-            meta
-          ).then(function (rec) {
+        return gotoReportPage(meta.index).then(function (nav) {
+          var label = "page" + meta.index + " " + meta.name;
+          if (nav && nav.changed === false) label += " (ekran ne smenilsya)";
+          return captureAtlasPage(label, "auto_page", meta).then(function (rec) {
             collected.push(rec);
           });
         });
@@ -748,6 +912,9 @@
     }
     chain = chain.then(function () {
       return gotoReportPage(page0.index);
+    });
+    chain = chain.then(function () {
+      probeBox = atlasProbe();
     });
     chain = chain.then(function () {
       return atlasDrillShot(collected, "drill Brest", function () {
@@ -795,9 +962,10 @@
         return fetch("/api/atlas", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
+            body: JSON.stringify({
             replace: true,
             captured_at: new Date().toISOString(),
+            probe: probeBox || atlasProbe(),
             pages: collected,
           }),
           cache: "no-store",

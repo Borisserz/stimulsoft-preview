@@ -202,6 +202,55 @@ class AtlasPackTests(unittest.TestCase):
         self.assertIn("29 370,1", text)
         self.assertIn("722 087,2", text)
 
+    def test_probe_and_click_diag_stay_in_text(self) -> None:
+        stored = apply_atlas_post(
+            None,
+            {
+                "replace": True,
+                "probe": {
+                    "drill_guid": "net",
+                    "buttons": [{"page": 0, "text": "P6", "selected": True}],
+                    "geoms": [
+                        {
+                            "ident": "",
+                            "argument": "BrestskaiaVoblasts",
+                            "value": "7 099,31",
+                            "onclick": True,
+                        }
+                    ],
+                },
+                "pages": [
+                    {
+                        "label": "drill Brest",
+                        "kind": "drill",
+                        "diag": {
+                            "nav": {"text": "P6", "via": "panel", "changed": False},
+                            "click": {
+                                "argument": "BrestskaiaVoblasts",
+                                "ident": "",
+                                "onclick": True,
+                                "via": "onclick",
+                            },
+                            "tables": [
+                                {
+                                    "name": "PivotTableElement6",
+                                    "capture": "html_grid",
+                                    "rows": 18,
+                                    "reason": "viewer_zero",
+                                }
+                            ],
+                        },
+                        "viewport": {"elements": []},
+                    }
+                ],
+            },
+        )
+        text = build_atlas_text(stored)
+        self.assertIn("BrestskaiaVoblasts", text)
+        self.assertIn("page-knopka 0 P6", text)
+        self.assertIn("onclick=da", text)
+        self.assertIn("reason=viewer_zero", text)
+
     def test_normalize_empty(self) -> None:
         self.assertEqual(normalize_atlas(None)["page_count"], 0)
 

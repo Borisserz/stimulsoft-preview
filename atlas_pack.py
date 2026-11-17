@@ -80,6 +80,7 @@ def normalize_atlas_page(raw: Any) -> dict[str, Any] | None:
         "interaction": interaction,
         "structure": structure,
         "facts": facts,
+        "diag": raw.get("diag") if isinstance(raw.get("diag"), dict) else None,
         "highlights": raw.get("highlights")
         if isinstance(raw.get("highlights"), dict)
         else _highlights_from_structure(structure),
@@ -95,11 +96,14 @@ def normalize_atlas(raw: Any) -> dict[str, Any]:
         page = normalize_atlas_page(item)
         if page:
             pages.append(page)
-    return {
+    out = {
         "captured_at": raw.get("captured_at"),
         "pages": pages,
         "page_count": len(pages),
     }
+    if isinstance(raw.get("probe"), dict):
+        out["probe"] = raw["probe"]
+    return out
 
 
 def apply_atlas_post(current: dict[str, Any] | None, body: Any) -> dict[str, Any]:
@@ -122,8 +126,31 @@ def apply_atlas_post(current: dict[str, Any] | None, body: Any) -> dict[str, Any
     out = {
         "captured_at": body.get("captured_at") or cur.get("captured_at"),
         "pages": pages,
+        "probe": body.get("probe") if isinstance(body.get("probe"), dict) else cur.get("probe"),
     }
     return normalize_atlas(out)
+
+
+_ROW_KEEP = ("наименован", "регион", "имнс", "факт", "план", "выполнен", "отклон", "процент")
+
+
+def _compact_row(row: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key, value in row.items():
+        text = "" if value is None else str(value).strip()
+        if not text:
+            continue
+        low = str(key).lower()
+        if not any(bit in low for bit in _ROW_KEEP):
+            continue
+        short = str(key).split("/")[-1].strip() or str(key)
+        parts.append(f"{short}={text}")
+    if not parts:
+        for key, value in list(row.items())[:4]:
+            text = "" if value is None else str(value).strip()
+            if text:
+                parts.append(f"{key}={text}")
+    return "; ".join(parts[:6])
 
 
 def build_atlas_text(atlas: dict[str, Any] | None) -> str:
@@ -134,6 +161,30 @@ def build_atlas_text(atlas: dict[str, Any] | None) -> str:
     lines.append("Pustye oblasti v etoj baze — net dannyh, ne oshibka parsera.")
     lines.append(f"captured_at = {at.get('captured_at')}")
     lines.append(f"snapshots = {at.get('page_count')}")
+    probe = at.get("probe") if isinstance(at.get("probe"), dict) else {}
+    if probe.get("buttons") or probe.get("geoms"):
+        lines.append("")
+        lines.append("RAZVEDKA (chto mozhno nazhat):")
+        if probe.get("drill_guid"):
+            lines.append(f"   drill_guid={probe.get('drill_guid')}")
+        for btn in (probe.get("buttons") or [])[:8]:
+            if not isinstance(btn, dict):
+                continue
+            mark = " selected" if btn.get("selected") else ""
+            lines.append(
+                f"   page-knopka {btn.get('page')} {btn.get('text') or ''}{mark}".rstrip()
+            )
+        for geom in (probe.get("geoms") or [])[:12]:
+            if not isinstance(geom, dict):
+                continue
+            lines.append(
+                "   karta ident={ident} arg={argument} value={value} onclick={onclick}".format(
+                    ident=geom.get("ident") or "-",
+                    argument=geom.get("argument") or "-",
+                    value=geom.get("value") or "-",
+                    onclick="da" if geom.get("onclick") else "net",
+                )
+            )
     lines.append("")
     for i, page in enumerate(at.get("pages") or []):
         lines.append("-" * 42)
@@ -154,6 +205,33 @@ def build_atlas_text(atlas: dict[str, Any] | None) -> str:
         inter = page.get("interaction") or {}
         if isinstance(inter, dict) and inter.get("action"):
             lines.append(f"   last_action={inter.get('action')}")
+        diag = page.get("diag") if isinstance(page.get("diag"), dict) else {}
+        click = diag.get("click") if isinstance(diag.get("click"), dict) else {}
+        nav = diag.get("nav") if isinstance(diag.get("nav"), dict) else {}
+        if nav or click:
+            bits = []
+            if nav.get("text"):
+                bits.append(f"nav={nav.get('text')}")
+            if nav.get("via"):
+                bits.append(f"via={nav.get('via')}")
+            if "changed" in nav:
+                bits.append("ekran=" + ("smenilsya" if nav.get("changed") else "tot-zhe"))
+            if click:
+                bits.append(
+                    "klik arg={argument} ident={ident} onclick={onclick} via={via}".format(
+                        argument=click.get("argument") or "-",
+                        ident=click.get("ident") or "-",
+                        onclick="da" if click.get("onclick") else "net",
+                        via=click.get("via") or "-",
+                    )
+                )
+            lines.append("   diag: " + " | ".join(bits))
+        for table in (diag.get("tables") or [])[:4]:
+            if isinstance(table, dict):
+                lines.append(
+                    f"   pivot-diag {table.get('name')} capture={table.get('capture')} "
+                    f"rows={table.get('rows')} reason={table.get('reason')}"
+                )
         facts = page.get("facts") if isinstance(page.get("facts"), dict) else {}
         named_buttons = []
         for btn in facts.get("buttons") or []:
@@ -197,7 +275,7 @@ def build_atlas_text(atlas: dict[str, Any] | None) -> str:
                     shown.append(row)
                     break
             for n, row in enumerate(shown, start=1):
-                lines.append(f"      {n}) {row}")
+                lines.append(f"      {n}) {_compact_row(row) if isinstance(row, dict) else row}")
             extra = int(table.get("row_count") or 0) - len(shown)
             if extra > 0:
                 lines.append(f"      ... eshche {extra} strok v JSON /api/atlas")
