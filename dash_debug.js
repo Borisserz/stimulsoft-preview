@@ -554,42 +554,148 @@
   function cellValue(cell) {
     if (cell == null) return null;
     if (typeof cell !== "object") return cell;
+    // Stimulsoft table body cells use .text (see DataGrid.showData)
     if (cell.text !== undefined && cell.text !== null) return cell.text;
     if (cell.value !== undefined && cell.value !== null) return cell.value;
     if (cell.label !== undefined && cell.label !== null) return cell.label;
     if (cell.displayValue !== undefined && cell.displayValue !== null)
       return cell.displayValue;
     if (cell.caption !== undefined && cell.caption !== null) return cell.caption;
+    if (cell.image !== undefined && cell.image !== null) return cell.image;
     return null;
   }
 
+  function uniqueColumns(names) {
+    var seen = {};
+    var out = [];
+    for (var i = 0; i < names.length; i++) {
+      var base = String(names[i] || "").trim() || "c" + i;
+      var name = base;
+      var n = 2;
+      while (seen[name]) {
+        name = base + "_" + n;
+        n++;
+      }
+      seen[name] = true;
+      out.push(name);
+    }
+    return out;
+  }
+
   function parseGridData(data) {
+    // Stimulsoft: data[0] = header cells ({label, key, ...}), data[1..] = row cells ({text})
     if (!Array.isArray(data) || data.length < 1) return null;
     var header = data[0];
-    if (!Array.isArray(header)) return null;
+    if (!Array.isArray(header) || header.length < 1) return null;
     var hasTotal = false;
     for (var h = 0; h < header.length; h++) {
       if (header[h] && header[h].showTotalSummary) hasTotal = true;
     }
     var end = hasTotal && data.length > 1 ? data.length - 1 : data.length;
-    var columns = [];
+    var rawNames = [];
     for (var c = 0; c < header.length; c++) {
       var col = header[c] || {};
-      columns.push(
-        col.key || col.label || col.text || col.name || col.column || "c" + c
+      // label is what the UI shows (owningColumnName in viewer)
+      rawNames.push(
+        col.label || col.key || col.text || col.name || col.column || "c" + c
       );
     }
+    var columns = uniqueColumns(rawNames);
     var rows = [];
     for (var r = 1; r < end; r++) {
       var row = data[r];
       if (!Array.isArray(row)) continue;
       var obj = {};
+      var any = false;
       for (var i = 0; i < columns.length; i++) {
-        obj[columns[i]] = cellValue(row[i]);
+        var v = cellValue(row[i]);
+        obj[columns[i]] = v;
+        if (v !== null && v !== undefined && v !== "") any = true;
       }
-      rows.push(obj);
+      // keep empty rows too if they exist in grid (rare); prefer non-empty
+      if (any || row.length > 0) rows.push(obj);
     }
-    return { columns: columns, rows: rows, row_count: rows.length };
+    return {
+      columns: columns,
+      rows: rows,
+      row_count: rows.length,
+      capture: "grid",
+    };
+  }
+
+  function scrapeHtmlTables(root) {
+    // Structured fallback: never smash the whole table into one string.
+    if (!root) return null;
+    var tables = root.getElementsByTagName
+      ? root.getElementsByTagName("table")
+      : [];
+    var best = null;
+    for (var t = 0; t < tables.length; t++) {
+      var table = tables[t];
+      var trs = table.rows;
+      if (!trs || trs.length < 2) continue;
+      // skip tiny chrome (1-col nav / icon) tables
+      var headerCells = trs[0].cells;
+      if (!headerCells || headerCells.length < 1) continue;
+      var rawNames = [];
+      for (var c = 0; c < headerCells.length; c++) {
+        rawNames.push(
+          String(headerCells[c].innerText || headerCells[c].textContent || "")
+            .replace(/\s+/g, " ")
+            .trim() || "c" + c
+        );
+      }
+      var columns = uniqueColumns(rawNames);
+      var rows = [];
+      for (var r = 1; r < trs.length; r++) {
+        var cells = trs[r].cells;
+        if (!cells || cells.length < 1) continue;
+        var obj = {};
+        var any = false;
+        for (var i = 0; i < columns.length; i++) {
+          var cell = cells[i];
+          var v = cell
+            ? String(cell.innerText || cell.textContent || "")
+                .replace(/\s+/g, " ")
+                .trim()
+            : "";
+          obj[columns[i]] = v;
+          if (v) any = true;
+        }
+        if (any) rows.push(obj);
+      }
+      if (rows.length < 1) continue;
+      if (!best || rows.length > best.row_count) {
+        best = {
+          columns: columns,
+          rows: rows,
+          row_count: rows.length,
+          capture: "html",
+        };
+      }
+    }
+    return best;
+  }
+
+  function captureTableElement(domEl, ca) {
+    var gridData =
+      (domEl.dataGrid && domEl.dataGrid.data) ||
+      (ca && ca.data) ||
+      null;
+    var parsed = parseGridData(gridData);
+    if (parsed && parsed.row_count > 0) return parsed;
+    var htmlParsed = scrapeHtmlTables(domEl);
+    if (htmlParsed && htmlParsed.row_count > 0) return htmlParsed;
+    // header-only grid still useful (columns known)
+    if (parsed && parsed.columns && parsed.columns.length) {
+      return {
+        columns: parsed.columns,
+        rows: [],
+        row_count: 0,
+        capture: "grid_empty",
+      };
+    }
+    return { columns: [], rows: [], row_count: 0, capture: "empty" };
   }
 
   function elementTitle(attrs) {
@@ -638,17 +744,13 @@
       if (ef.length) out.filters = ef;
     }
 
-    if (type === "StiTableElement") {
-      var gridData =
-        (domEl.dataGrid && domEl.dataGrid.data) || ca.data || null;
-      var parsed = parseGridData(gridData);
-      if (parsed) {
-        out.columns = parsed.columns;
-        out.rows = parsed.rows;
-        out.row_count = parsed.row_count;
-      } else {
-        out.text = visibleText(domEl, 800);
-      }
+    if (type === "StiTableElement" || type === "StiPivotTableElement") {
+      var table = captureTableElement(domEl, ca);
+      out.columns = table.columns;
+      out.rows = table.rows;
+      out.row_count = table.row_count;
+      out.capture = table.capture;
+      // NEVER smash the whole table into one text string
       return out;
     }
 
@@ -664,7 +766,6 @@
       type === "StiComboBoxElement" ||
       type === "StiTreeViewElement" ||
       type === "StiTreeViewBoxElement" ||
-      type === "StiPivotTableElement" ||
       type === "StiTextElement" ||
       type.indexOf("Button") >= 0
     ) {
@@ -673,25 +774,40 @@
       if (ca.series !== undefined) out.series = safeClone(ca.series);
       if (attrs.isChecked !== undefined) out.checked = !!attrs.isChecked;
       if (ca.isChecked !== undefined) out.checked = !!ca.isChecked;
-      // Always attach human-visible text fallback
-      var vt = visibleText(domEl, 600);
-      if (vt && out.text == null) out.text = vt;
+      // Short label only — not a full table dump
+      var vt = visibleText(domEl, 160);
+      if (vt && out.text == null && out.value == null) out.text = vt;
       if (type === "StiChartElement" && ca.data) {
         var chartGrid = parseGridData(ca.data);
-        if (chartGrid) {
+        if (chartGrid && chartGrid.row_count > 0) {
           out.columns = chartGrid.columns;
           out.rows = chartGrid.rows;
           out.row_count = chartGrid.row_count;
+          out.capture = chartGrid.capture;
+        } else {
+          var chartHtml = scrapeHtmlTables(domEl);
+          if (chartHtml) {
+            out.columns = chartHtml.columns;
+            out.rows = chartHtml.rows;
+            out.row_count = chartHtml.row_count;
+            out.capture = chartHtml.capture;
+          }
         }
-      }
-      if (type === "StiRegionMapElement" && ca.filters) {
-        /* filters already copied */
       }
       return out;
     }
 
-    // Unknown / other: keep title + visible text so nothing is silent-dropped
-    out.text = visibleText(domEl, 600);
+    // Unknown: short text only (avoid multi-kb table paste)
+    out.text = visibleText(domEl, 160);
+    // If it secretly contains a data table, capture structured
+    var maybeTable = scrapeHtmlTables(domEl);
+    if (maybeTable && maybeTable.row_count > 0) {
+      out.columns = maybeTable.columns;
+      out.rows = maybeTable.rows;
+      out.row_count = maybeTable.row_count;
+      out.capture = maybeTable.capture;
+      delete out.text;
+    }
     return out;
   }
 
@@ -735,14 +851,18 @@
       if (!domEl.elementAttributes || !domEl.elementAttributes.type) continue;
       var snap = snapshotElement(domEl);
       if (!snap) continue;
-      // prefer first rich capture per name
+      // prefer richer capture per name (rows >> value >> short text)
       if (seenNames[snap.name]) {
         var prev = elements[seenNames[snap.name]];
-        var prevScore =
-          (prev.rows ? prev.rows.length : 0) + (prev.text ? 1 : 0) + (prev.value != null ? 1 : 0);
-        var nextScore =
-          (snap.rows ? snap.rows.length : 0) + (snap.text ? 1 : 0) + (snap.value != null ? 1 : 0);
-        if (nextScore > prevScore) elements[seenNames[snap.name]] = snap;
+        function score(el) {
+          return (
+            (el.row_count || (el.rows ? el.rows.length : 0) || 0) * 1000 +
+            (el.value != null ? 10 : 0) +
+            (el.text && String(el.text).length < 200 ? 1 : 0) -
+            (el.text && String(el.text).length >= 200 ? 50 : 0)
+          );
+        }
+        if (score(snap) > score(prev)) elements[seenNames[snap.name]] = snap;
         continue;
       }
       seenNames[snap.name] = elements.length;
@@ -792,15 +912,17 @@
   }
 
   function refreshAfterInteraction(action) {
-    var delays = [700, 1600, 2800];
+    // Tables often paint later than KPI/map — retry until rows appear.
+    var delays = [800, 1800, 3200, 5000];
     if (
       action === "DashboardElementDrillDown" ||
       action === "DashboardElementDrillUp" ||
       action === "DashboardDrillDown" ||
       action === "DashboardFiltering" ||
-      action === "DashboardButtonElementApplyEvents"
+      action === "DashboardButtonElementApplyEvents" ||
+      action === "Variables"
     ) {
-      delays = [600, 1400, 2600, 4000];
+      delays = [700, 1500, 2800, 4500, 6500];
     }
     delays.forEach(function (ms) {
       setTimeout(postViewportAndCompare, ms);

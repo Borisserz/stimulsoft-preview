@@ -64,6 +64,13 @@ def normalize_viewport(raw: Any) -> dict[str, Any]:
             out["series"] = el.get("series")
         if el.get("filters") is not None:
             out["filters"] = el.get("filters")
+        if el.get("capture") is not None:
+            out["capture"] = el.get("capture")
+        # Drop smashed table dumps (one huge text blob instead of rows)
+        if out.get("rows") is not None and out.get("text") is not None:
+            text = str(out.get("text") or "")
+            if len(text) > 200:
+                out.pop("text", None)
         # keep small extras for unknown widgets
         extras = {
             k: v
@@ -81,6 +88,7 @@ def normalize_viewport(raw: Any) -> dict[str, Any]:
                 "checked",
                 "series",
                 "filters",
+                "capture",
             }
             and v is not None
         }
@@ -194,7 +202,14 @@ def build_viewport_compare_text(pack: dict[str, Any] | None, *, max_rows: int = 
             rc = int(el.get("row_count") or len(rows))
             table_rows_total += rc
             shown = min(len(rows), max(0, max_rows))
-            lines.append(f"      strok={rc}  pokazano_zdes={shown}")
+            cap = el.get("capture") or "-"
+            cols = el.get("columns") or []
+            lines.append(
+                f"      strok={rc}  cols={len(cols)}  capture={cap}  "
+                f"pokazano_zdes={shown}"
+            )
+            if cols:
+                lines.append(f"      columns={cols}")
             for i, row in enumerate(rows[: max(0, max_rows)]):
                 lines.append(
                     f"      {i+1}) {json.dumps(json_safe(row), ensure_ascii=False)}"
