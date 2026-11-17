@@ -554,12 +554,13 @@
   function cellValue(cell) {
     if (cell == null) return null;
     if (typeof cell !== "object") return cell;
-    // Stimulsoft table body cells use .text (see DataGrid.showData)
+    // Stimulsoft filter/export prefers .value then .text (amounts often in .value)
+    if (cell.value !== undefined && cell.value !== null && cell.value !== "")
+      return cell.value;
     if (cell.text !== undefined && cell.text !== null) return cell.text;
-    if (cell.value !== undefined && cell.value !== null) return cell.value;
-    if (cell.label !== undefined && cell.label !== null) return cell.label;
     if (cell.displayValue !== undefined && cell.displayValue !== null)
       return cell.displayValue;
+    if (cell.label !== undefined && cell.label !== null) return cell.label;
     if (cell.caption !== undefined && cell.caption !== null) return cell.caption;
     if (cell.image !== undefined && cell.image !== null) return cell.image;
     return null;
@@ -569,7 +570,11 @@
     var seen = {};
     var out = [];
     for (var i = 0; i < names.length; i++) {
-      var base = String(names[i] || "").trim() || "c" + i;
+      var base = String(names[i] || "")
+        .replace(/\s+/g, " ")
+        .trim();
+      // avoid multi-line header smash becoming "Name Region" weird splits later
+      if (!base) base = "c" + i;
       var name = base;
       var n = 2;
       while (seen[name]) {
@@ -582,8 +587,69 @@
     return out;
   }
 
-  function parseGridData(data) {
-    // Stimulsoft: data[0] = header cells ({label, key, ...}), data[1..] = row cells ({text})
+  function headerColumnName(col, index) {
+    if (!col || typeof col !== "object") return "c" + index;
+    // labelCorrect is what Stimulsoft uses when merging hidden columns
+    var name =
+      col.labelCorrect ||
+      col.label ||
+      col.text ||
+      col.name ||
+      col.column ||
+      col.key ||
+      "c" + index;
+    return String(name).replace(/\s+/g, " ").trim() || "c" + index;
+  }
+
+  function mergeVisibleAndHidden(data, hidden) {
+    // Amounts / extra measures often live in hiddenData — must concat like Stimulsoft does.
+    if (!Array.isArray(data) || data.length < 1) {
+      return Array.isArray(hidden) && hidden.length ? hidden : null;
+    }
+    if (!Array.isArray(hidden) || hidden.length < 1) return data;
+    if (!Array.isArray(hidden[0]) || hidden[0].length < 1) return data;
+    var out = [];
+    var n = Math.max(data.length, hidden.length);
+    for (var r = 0; r < n; r++) {
+      var a = Array.isArray(data[r]) ? data[r] : [];
+      var b = Array.isArray(hidden[r]) ? hidden[r] : [];
+      out.push(a.concat(b));
+    }
+    return out;
+  }
+
+  function countNumericCells(row) {
+    if (!row || typeof row !== "object") return 0;
+    var n = 0;
+    Object.keys(row).forEach(function (k) {
+      var v = row[k];
+      if (v === null || v === undefined || v === "") return;
+      if (typeof v === "number") {
+        n++;
+        return;
+      }
+      var s = String(v).replace(/\s/g, "").replace(",", ".");
+      if (/^-?\d+(\.\d+)?$/.test(s)) n++;
+    });
+    return n;
+  }
+
+  function tableScore(parsed) {
+    if (!parsed) return -1;
+    var cols = (parsed.columns && parsed.columns.length) || 0;
+    var rows = parsed.row_count || 0;
+    var nums = 0;
+    if (parsed.rows && parsed.rows.length) {
+      nums = countNumericCells(parsed.rows[0]);
+      if (parsed.rows.length > 1)
+        nums = Math.max(nums, countNumericCells(parsed.rows[1]));
+    }
+    // prefer wide tables with numbers over skinny name/region lists
+    return cols * 200 + nums * 500 + rows;
+  }
+
+  function parseGridData(data, captureTag) {
+    // Stimulsoft: data[0] = header ({labelCorrect,label,key}), data[1..] = cells ({value,text})
     if (!Array.isArray(data) || data.length < 1) return null;
     var header = data[0];
     if (!Array.isArray(header) || header.length < 1) return null;
@@ -594,11 +660,7 @@
     var end = hasTotal && data.length > 1 ? data.length - 1 : data.length;
     var rawNames = [];
     for (var c = 0; c < header.length; c++) {
-      var col = header[c] || {};
-      // label is what the UI shows (owningColumnName in viewer)
-      rawNames.push(
-        col.label || col.key || col.text || col.name || col.column || "c" + c
-      );
+      rawNames.push(headerColumnName(header[c], c));
     }
     var columns = uniqueColumns(rawNames);
     var rows = [];
@@ -612,14 +674,13 @@
         obj[columns[i]] = v;
         if (v !== null && v !== undefined && v !== "") any = true;
       }
-      // keep empty rows too if they exist in grid (rare); prefer non-empty
       if (any || row.length > 0) rows.push(obj);
     }
     return {
       columns: columns,
       rows: rows,
       row_count: rows.length,
-      capture: "grid",
+      capture: captureTag || "grid",
     };
   }
 
@@ -634,9 +695,8 @@
       var table = tables[t];
       var trs = table.rows;
       if (!trs || trs.length < 2) continue;
-      // skip tiny chrome (1-col nav / icon) tables
       var headerCells = trs[0].cells;
-      if (!headerCells || headerCells.length < 1) continue;
+      if (!headerCells || headerCells.length < 2) continue; // skip 1-col chrome
       var rawNames = [];
       for (var c = 0; c < headerCells.length; c++) {
         rawNames.push(
@@ -645,11 +705,15 @@
             .trim() || "c" + c
         );
       }
+      // skip if header looks like one smashed sentence (few cells but huge text)
+      if (headerCells.length <= 2 && rawNames.join(" ").length > 80) continue;
       var columns = uniqueColumns(rawNames);
       var rows = [];
       for (var r = 1; r < trs.length; r++) {
         var cells = trs[r].cells;
         if (!cells || cells.length < 1) continue;
+        // misaligned / nested chrome rows
+        if (cells.length + 2 < columns.length) continue;
         var obj = {};
         var any = false;
         for (var i = 0; i < columns.length; i++) {
@@ -665,28 +729,34 @@
         if (any) rows.push(obj);
       }
       if (rows.length < 1) continue;
-      if (!best || rows.length > best.row_count) {
-        best = {
-          columns: columns,
-          rows: rows,
-          row_count: rows.length,
-          capture: "html",
-        };
-      }
+      var cand = {
+        columns: columns,
+        rows: rows,
+        row_count: rows.length,
+        capture: "html",
+      };
+      if (!best || tableScore(cand) > tableScore(best)) best = cand;
     }
     return best;
   }
 
   function captureTableElement(domEl, ca) {
-    var gridData =
-      (domEl.dataGrid && domEl.dataGrid.data) ||
-      (ca && ca.data) ||
-      null;
-    var parsed = parseGridData(gridData);
-    if (parsed && parsed.row_count > 0) return parsed;
+    var dg = domEl.dataGrid || null;
+    var visible =
+      (dg && dg.data) || (ca && ca.data) || null;
+    var hidden =
+      (dg && dg.hiddenData) || (ca && ca.hiddenData) || null;
+    var merged = mergeVisibleAndHidden(visible, hidden);
+    var parsed = parseGridData(
+      merged,
+      hidden && hidden.length ? "grid+hidden" : "grid"
+    );
     var htmlParsed = scrapeHtmlTables(domEl);
-    if (htmlParsed && htmlParsed.row_count > 0) return htmlParsed;
-    // header-only grid still useful (columns known)
+    // pick richest: more columns + numeric cells wins (not just row count)
+    var best = null;
+    if (parsed && parsed.row_count > 0) best = parsed;
+    if (htmlParsed && tableScore(htmlParsed) > tableScore(best)) best = htmlParsed;
+    if (best) return best;
     if (parsed && parsed.columns && parsed.columns.length) {
       return {
         columns: parsed.columns,
