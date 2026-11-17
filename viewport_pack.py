@@ -66,6 +66,10 @@ def normalize_viewport(raw: Any) -> dict[str, Any]:
             out["filters"] = el.get("filters")
         if el.get("capture") is not None:
             out["capture"] = el.get("capture")
+        if el.get("column_meta") is not None:
+            out["column_meta"] = el.get("column_meta")
+        if el.get("totals") is not None:
+            out["totals"] = el.get("totals")
         # Drop smashed table dumps (one huge text blob instead of rows)
         if out.get("rows") is not None and out.get("text") is not None:
             text = str(out.get("text") or "")
@@ -89,6 +93,8 @@ def normalize_viewport(raw: Any) -> dict[str, Any]:
                 "series",
                 "filters",
                 "capture",
+                "column_meta",
+                "totals",
             }
             and v is not None
         }
@@ -210,6 +216,10 @@ def build_viewport_compare_text(pack: dict[str, Any] | None, *, max_rows: int = 
             )
             if cols:
                 lines.append(f"      columns={cols}")
+            if el.get("totals"):
+                lines.append(
+                    f"      totals={json.dumps(json_safe(el.get('totals')), ensure_ascii=False)}"
+                )
             for i, row in enumerate(rows[: max(0, max_rows)]):
                 lines.append(
                     f"      {i+1}) {json.dumps(json_safe(row), ensure_ascii=False)}"

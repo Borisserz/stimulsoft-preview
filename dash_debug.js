@@ -551,30 +551,36 @@
 
   var lastInteractionDump = null;
 
-  function cellValue(cell) {
+  /* ========== Stimulsoft table model (viewer.js DataGrid.showData) ==========
+   * data[0]=headers {labelCorrect,label,key,path,showTotalSummary,...}
+   * data[1..]=body {value,text} ; optional last totals row
+   * hiddenData merges by row index: header.concat / cells.concat
+   * value = cell.value != null ? cell.value : cell.text
+   * HTML = 3 tables (header / body-without-header / footer) — fallback only
+   * See docs/superpowers/specs/2026-11-17-stimulsoft-table-render.md
+   */
+
+  function stiCellValue(cell) {
     if (cell == null) return null;
     if (typeof cell !== "object") return cell;
-    // Stimulsoft filter/export prefers .value then .text (amounts often in .value)
-    if (cell.value !== undefined && cell.value !== null && cell.value !== "")
-      return cell.value;
+    // Exact Stimulsoft replaceRowValues rule
+    if (cell.value !== undefined && cell.value !== null) return cell.value;
     if (cell.text !== undefined && cell.text !== null) return cell.text;
-    if (cell.displayValue !== undefined && cell.displayValue !== null)
-      return cell.displayValue;
-    if (cell.label !== undefined && cell.label !== null) return cell.label;
-    if (cell.caption !== undefined && cell.caption !== null) return cell.caption;
     if (cell.image !== undefined && cell.image !== null) return cell.image;
     return null;
   }
 
-  function uniqueColumns(names) {
+  function stiNormStr(v) {
+    if (v === null || v === undefined) return v;
+    if (typeof v === "number" || typeof v === "boolean") return v;
+    return String(v).replace(/\s+/g, " ").trim();
+  }
+
+  function stiUniqueNames(names) {
     var seen = {};
     var out = [];
     for (var i = 0; i < names.length; i++) {
-      var base = String(names[i] || "")
-        .replace(/\s+/g, " ")
-        .trim();
-      // avoid multi-line header smash becoming "Name Region" weird splits later
-      if (!base) base = "c" + i;
+      var base = stiNormStr(names[i]) || "c" + i;
       var name = base;
       var n = 2;
       while (seen[name]) {
@@ -587,82 +593,62 @@
     return out;
   }
 
-  function headerColumnName(col, index) {
+  function stiHeaderName(col, index) {
     if (!col || typeof col !== "object") return "c" + index;
-    // labelCorrect is what Stimulsoft uses when merging hidden columns
-    var name =
-      col.labelCorrect ||
-      col.label ||
-      col.text ||
-      col.name ||
-      col.column ||
-      col.key ||
-      "c" + index;
-    return String(name).replace(/\s+/g, " ").trim() || "c" + index;
+    // labelCorrect is what Stimulsoft uses in {row.X} replacements
+    return (
+      stiNormStr(
+        col.labelCorrect ||
+          col.label ||
+          col.text ||
+          col.name ||
+          col.column ||
+          col.key
+      ) || "c" + index
+    );
   }
 
-  function mergeVisibleAndHidden(data, hidden) {
-    // Amounts / extra measures often live in hiddenData — must concat like Stimulsoft does.
-    if (!Array.isArray(data) || data.length < 1) {
+  function stiMergeVisibleHidden(visible, hidden) {
+    if (!Array.isArray(visible) || visible.length < 1) {
       return Array.isArray(hidden) && hidden.length ? hidden : null;
     }
-    if (!Array.isArray(hidden) || hidden.length < 1) return data;
-    if (!Array.isArray(hidden[0]) || hidden[0].length < 1) return data;
+    if (!Array.isArray(hidden) || hidden.length < 1) return visible;
+    if (!Array.isArray(hidden[0]) || hidden[0].length < 1) return visible;
     var out = [];
-    var n = Math.max(data.length, hidden.length);
+    var n = Math.max(visible.length, hidden.length);
     for (var r = 0; r < n; r++) {
-      var a = Array.isArray(data[r]) ? data[r] : [];
+      var a = Array.isArray(visible[r]) ? visible[r] : [];
       var b = Array.isArray(hidden[r]) ? hidden[r] : [];
       out.push(a.concat(b));
     }
     return out;
   }
 
-  function countNumericCells(row) {
-    if (!row || typeof row !== "object") return 0;
-    var n = 0;
-    Object.keys(row).forEach(function (k) {
-      var v = row[k];
-      if (v === null || v === undefined || v === "") return;
-      if (typeof v === "number") {
-        n++;
-        return;
-      }
-      var s = String(v).replace(/\s/g, "").replace(",", ".");
-      if (/^-?\d+(\.\d+)?$/.test(s)) n++;
-    });
-    return n;
-  }
-
-  function tableScore(parsed) {
-    if (!parsed) return -1;
-    var cols = (parsed.columns && parsed.columns.length) || 0;
-    var rows = parsed.row_count || 0;
-    var nums = 0;
-    if (parsed.rows && parsed.rows.length) {
-      nums = countNumericCells(parsed.rows[0]);
-      if (parsed.rows.length > 1)
-        nums = Math.max(nums, countNumericCells(parsed.rows[1]));
-    }
-    // prefer wide tables with numbers over skinny name/region lists
-    return cols * 200 + nums * 500 + rows;
-  }
-
-  function parseGridData(data, captureTag) {
-    // Stimulsoft: data[0] = header ({labelCorrect,label,key}), data[1..] = cells ({value,text})
+  function stiParseGrid(data, captureTag) {
     if (!Array.isArray(data) || data.length < 1) return null;
     var header = data[0];
     if (!Array.isArray(header) || header.length < 1) return null;
+
     var hasTotal = false;
-    for (var h = 0; h < header.length; h++) {
-      if (header[h] && header[h].showTotalSummary) hasTotal = true;
-    }
-    var end = hasTotal && data.length > 1 ? data.length - 1 : data.length;
+    var columnMeta = [];
     var rawNames = [];
     for (var c = 0; c < header.length; c++) {
-      rawNames.push(headerColumnName(header[c], c));
+      var h = header[c] || {};
+      if (h.showTotalSummary) hasTotal = true;
+      var name = stiHeaderName(h, c);
+      rawNames.push(name);
+      columnMeta.push({
+        name: name,
+        key: h.key != null ? h.key : null,
+        path: h.path != null ? h.path : null,
+        dataType: h.dataType != null ? h.dataType : null,
+        hidden: !!h.visibilityTrueAndHidden,
+      });
     }
-    var columns = uniqueColumns(rawNames);
+    var columns = stiUniqueNames(rawNames);
+    for (var m = 0; m < columnMeta.length; m++) columnMeta[m].name = columns[m];
+
+    var end = hasTotal && data.length > 1 ? data.length - 1 : data.length;
     var rows = [];
     for (var r = 1; r < end; r++) {
       var row = data[r];
@@ -670,17 +656,30 @@
       var obj = {};
       var any = false;
       for (var i = 0; i < columns.length; i++) {
-        var v = cellValue(row[i]);
-        if (typeof v === "string") v = v.replace(/\s+/g, " ").trim();
+        var v = stiNormStr(stiCellValue(row[i]));
         obj[columns[i]] = v;
         if (v !== null && v !== undefined && v !== "") any = true;
       }
-      if (any || row.length > 0) rows.push(obj);
+      if (any) rows.push(obj);
     }
+
+    var totals = null;
+    if (hasTotal && data.length > 1) {
+      var trow = data[data.length - 1];
+      if (Array.isArray(trow)) {
+        totals = {};
+        for (var t = 0; t < columns.length; t++) {
+          totals[columns[t]] = stiNormStr(stiCellValue(trow[t]));
+        }
+      }
+    }
+
     return {
       columns: columns,
+      column_meta: columnMeta,
       rows: rows,
       row_count: rows.length,
+      totals: totals,
       capture: captureTag || "grid",
     };
   }
@@ -697,14 +696,8 @@
     return s.length > 0 && /^[\d.,\-%]+$/.test(s);
   }
 
-  function scrapeHtmlTables(root) {
-    /**
-     * Stimulsoft DataGrid = several <table>s:
-     *   1) header table (1 row of labels)
-     *   2) body table (ONLY data rows — row0 is NOT a header!)
-     *   3) optional footer
-     * Old scrape treated body row0 as headers → amounts "split" across rows.
-     */
+  function stiScrapeHtmlFallback(root) {
+    // Last resort only. Stimulsoft: header table (1 row) + body table (data only).
     if (!root || !root.getElementsByTagName) return null;
     var tables = root.getElementsByTagName("table");
     var headerNames = null;
@@ -726,28 +719,24 @@
           names.push(nm);
           if (looksLikeDigitHeader(nm)) digitish++;
         }
-        // real column header row: mostly labels, not numbers
         if (digitish * 2 < names.length) headerNames = names;
         continue;
       }
 
-      // candidate body / footer: many rows
       var sc = trs.length * row0.cells.length;
       if (sc > bodyScore) {
         bodyScore = sc;
         bodyTable = table;
       }
     }
-
-    if (!bodyTable || !bodyTable.rows || bodyTable.rows.length < 1) return null;
+    if (!bodyTable) return null;
 
     var columns;
     var startRow;
     if (headerNames && headerNames.length) {
-      columns = uniqueColumns(headerNames);
-      startRow = 0; // every body row is data
+      columns = stiUniqueNames(headerNames);
+      startRow = 0;
     } else {
-      // no separate header table — only use row0 as header if it looks like labels
       var hc = bodyTable.rows[0].cells;
       var trial = [];
       var d = 0;
@@ -757,30 +746,28 @@
         if (looksLikeDigitHeader(tn)) d++;
       }
       if (d * 2 >= trial.length) {
-        // row0 is data (digits) — synthesize col names
-        columns = uniqueColumns(
+        columns = stiUniqueNames(
           trial.map(function (_x, idx) {
             return "c" + idx;
           })
         );
         startRow = 0;
       } else {
-        columns = uniqueColumns(trial);
+        columns = stiUniqueNames(trial);
         startRow = 1;
       }
     }
 
-    // If body width != header width, trust body width and pad names
     var bodyWidth = bodyTable.rows[0].cells.length;
     if (bodyWidth > columns.length) {
       for (var p = columns.length; p < bodyWidth; p++) columns.push("c" + p);
-      columns = uniqueColumns(columns);
+      columns = stiUniqueNames(columns);
     }
 
     var rows = [];
     for (var r = startRow; r < bodyTable.rows.length; r++) {
       var cells = bodyTable.rows[r].cells;
-      if (!cells || cells.length < 1) continue;
+      if (!cells || !cells.length) continue;
       var obj = {};
       var any = false;
       for (var j = 0; j < columns.length; j++) {
@@ -799,45 +786,81 @@
     };
   }
 
+  function stiResolveTitle(domEl, attrs) {
+    // Painted title wins (already decoded)
+    if (domEl && domEl.titlePanel) {
+      var painted = htmlCellText(domEl.titlePanel);
+      if (painted) return painted;
+    }
+    var ca = attrs && attrs.contentAttributes;
+    if (ca && ca.title) {
+      if (typeof ca.title === "string") return stiNormStr(ca.title);
+      if (ca.title.visible === false) {
+        /* fall through to name */
+      } else if (ca.title.text != null) {
+        return stiNormStr(ca.title.text);
+      }
+    }
+    if (attrs && attrs.alias) return String(attrs.alias);
+    if (attrs && attrs.name) return String(attrs.name);
+    return null;
+  }
+
   function captureTableElement(domEl, ca) {
+    var attrs = domEl.elementAttributes || {};
     var dg = domEl.dataGrid || null;
+    // Prefer live dataGrid (post-showData); else contentAttributes snapshot
     var visible = (dg && dg.data) || (ca && ca.data) || null;
     var hidden = (dg && dg.hiddenData) || (ca && ca.hiddenData) || null;
-    var merged = mergeVisibleAndHidden(visible, hidden);
-    var parsed = parseGridData(
-      merged,
-      hidden && hidden.length && Array.isArray(hidden[0]) && hidden[0].length
-        ? "grid+hidden"
-        : "grid"
-    );
-    // CRITICAL: never let broken HTML override a good grid parse
-    // (that caused amount digits to "split" across rows).
-    if (parsed && parsed.row_count > 0) return parsed;
+    var merged = stiMergeVisibleHidden(visible, hidden);
+    var hasHidden =
+      Array.isArray(hidden) &&
+      hidden.length > 0 &&
+      Array.isArray(hidden[0]) &&
+      hidden[0].length > 0;
+    var parsed = stiParseGrid(merged, hasHidden ? "grid+hidden" : "grid");
 
-    var htmlParsed = scrapeHtmlTables(domEl);
-    if (htmlParsed && htmlParsed.row_count > 0) return htmlParsed;
+    // Never let HTML override a real grid — prevents amount-split-across-rows
+    if (parsed && parsed.row_count > 0) {
+      parsed.title = stiResolveTitle(domEl, attrs);
+      return parsed;
+    }
+
+    var htmlParsed = stiScrapeHtmlFallback(domEl);
+    if (htmlParsed && htmlParsed.row_count > 0) {
+      htmlParsed.title = stiResolveTitle(domEl, attrs);
+      return htmlParsed;
+    }
 
     if (parsed && parsed.columns && parsed.columns.length) {
       return {
         columns: parsed.columns,
+        column_meta: parsed.column_meta,
         rows: [],
         row_count: 0,
         capture: "grid_empty",
+        title: stiResolveTitle(domEl, attrs),
       };
     }
-    return { columns: [], rows: [], row_count: 0, capture: "empty" };
+    return {
+      columns: [],
+      rows: [],
+      row_count: 0,
+      capture: "empty",
+      title: stiResolveTitle(domEl, attrs),
+    };
   }
 
   function elementTitle(attrs) {
-    var ca = attrs && attrs.contentAttributes;
-    if (ca) {
-      if (ca.title != null && typeof ca.title !== "object") return String(ca.title);
-      if (ca.title && ca.title.text != null) return String(ca.title.text);
-      if (ca.titleText != null) return String(ca.titleText);
-      if (ca.headerText != null) return String(ca.headerText);
-    }
-    if (attrs && attrs.alias) return String(attrs.alias);
-    return null;
+    return stiResolveTitle(null, attrs);
+  }
+
+  // keep old name used by chart path
+  function parseGridData(data, tag) {
+    return stiParseGrid(data, tag);
+  }
+  function scrapeHtmlTables(root) {
+    return stiScrapeHtmlFallback(root);
   }
 
   function cloneFiltersList(list) {
@@ -884,8 +907,9 @@
       out.rows = table.rows;
       out.row_count = table.row_count;
       out.capture = table.capture;
-      if (!out.title) out.title = String(attrs.name || name);
-      // NEVER smash the whole table into one text string
+      out.title = table.title || out.title || String(attrs.name || name);
+      if (table.column_meta) out.column_meta = table.column_meta;
+      if (table.totals) out.totals = table.totals;
       return out;
     }
 
