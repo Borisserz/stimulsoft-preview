@@ -38,6 +38,9 @@ def structure_from_viewport(viewport: dict[str, Any] | None) -> dict[str, Any]:
                 item["columns"] = list(cols)[:40]
             if el.get("capture") is not None:
                 item["capture"] = el.get("capture")
+        regions = el.get("regions") if isinstance(el.get("regions"), list) else None
+        if regions:
+            item["regions"] = regions
         items.append(item)
 
     # Stable sort: buttons/filters first-ish by type family, then name
@@ -117,6 +120,8 @@ def build_structure_text(structure: dict[str, Any] | None) -> str:
             name = el.get("name")
             etype = el.get("type")
             title = el.get("title")
+            if isinstance(title, str) and len(title) > 48 and " " not in title:
+                title = None
             bits = [f"   [{name}] type={etype}"]
             if title:
                 bits.append(f"title={title!r}")
@@ -131,9 +136,18 @@ def build_structure_text(structure: dict[str, Any] | None) -> str:
                 if el.get("capture"):
                     bits.append(f"capture={el.get('capture')}")
                 cols = el.get("columns") or []
-                if cols:
+                if cols and not el.get("regions"):
                     bits.append(f"cols={cols}")
             lines.append(" ".join(bits))
+            for reg in el.get("regions") or []:
+                if not isinstance(reg, dict):
+                    continue
+                lines.append(
+                    f"      {reg.get('name')}"
+                    f"  amount={reg.get('amount')!r}"
+                    f"  percent={reg.get('percent')!r}"
+                    f"  value={reg.get('value')!r}"
+                )
         lines.append("")
 
     lines.append("========================================")

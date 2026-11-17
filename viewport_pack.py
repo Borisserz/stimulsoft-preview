@@ -70,6 +70,8 @@ def normalize_viewport(raw: Any) -> dict[str, Any]:
             out["column_meta"] = el.get("column_meta")
         if el.get("totals") is not None:
             out["totals"] = el.get("totals")
+        if el.get("regions") is not None:
+            out["regions"] = el.get("regions")
         # Drop smashed table dumps (one huge text blob instead of rows)
         if out.get("rows") is not None and out.get("text") is not None:
             text = str(out.get("text") or "")
@@ -95,6 +97,7 @@ def normalize_viewport(raw: Any) -> dict[str, Any]:
                 "capture",
                 "column_meta",
                 "totals",
+                "regions",
             }
             and v is not None
         }

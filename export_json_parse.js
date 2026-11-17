@@ -193,50 +193,72 @@
     return "";
   }
 
+  function normLabel(v) {
+    return String(v == null ? "" : v).replace(/\s+/g, " ").trim();
+  }
+
+  function looksNumericLabel(v) {
+    var s = normLabel(v).replace(/\s/g, "").replace("%", "").replace("руб.", "").replace("руб", "");
+    s = s.replace(",", ".");
+    return /^-?\d+(\.\d+)?$/.test(s);
+  }
+
   /**
-   * Flatten StiPivotTableHelper.getViewerData() result into row objects.
-   * cells[r][c].text; headerHeight × headerWidth = corner; amounts in the rest.
+   * Flatten StiPivotTableHelper.getViewerData().
+   * Viewer paints cells[columnIndex][rowIndex] (stimulsoft.viewer.js:
+   *   c = e.cells[p][A] with p < headerWidth, A >= headerHeight).
+   * headerWidth = row-header columns, headerHeight = column-header rows.
    */
   function parsePivotViewerData(viewerData) {
     if (!viewerData || typeof viewerData !== "object") return null;
     var cells = viewerData.cells;
     if (!Array.isArray(cells) || cells.length < 1) return null;
-    var headerHeight = Number(viewerData.headerHeight) || 0;
-    var headerWidth = Number(viewerData.headerWidth) || 0;
-    if (headerHeight < 0) headerHeight = 0;
-    if (headerWidth < 0) headerWidth = 0;
-    if (headerHeight >= cells.length) return null;
+    var headerHeight = Number(viewerData.headerHeight);
+    var headerWidth = Number(viewerData.headerWidth);
+    if (!isFinite(headerHeight) || headerHeight < 0) headerHeight = 0;
+    if (!isFinite(headerWidth) || headerWidth < 0) headerWidth = 0;
 
-    var colCount = 0;
-    for (var r0 = 0; r0 < cells.length; r0++) {
-      if (Array.isArray(cells[r0]) && cells[r0].length > colCount)
-        colCount = cells[r0].length;
+    var colCount = cells.length;
+    var rowCount = 0;
+    for (var c0 = 0; c0 < colCount; c0++) {
+      if (Array.isArray(cells[c0]) && cells[c0].length > rowCount)
+        rowCount = cells[c0].length;
     }
-    if (colCount < 1) return null;
+    if (rowCount < 1) return null;
+    if (headerHeight >= rowCount) headerHeight = 0;
+    if (headerWidth > colCount) headerWidth = colCount;
 
-    // Column names: join header rows for each data column; row-header cols get labels
+    function at(col, row) {
+      var column = cells[col];
+      if (!Array.isArray(column)) return "";
+      return normLabel(cellText(column[row]));
+    }
+
     var rawNames = [];
     for (var c = 0; c < colCount; c++) {
-      if (c < headerWidth) {
-        rawNames.push(c === 0 ? "row" : "row_" + c);
+      if (isChromeLabel(at(c, 0)) && headerHeight <= 1) {
+        rawNames.push("");
         continue;
       }
       var parts = [];
-      for (var hr = 0; hr < headerHeight; hr++) {
-        var row = cells[hr];
-        var t = Array.isArray(row) ? cellText(row[c]) : "";
-        t = String(t).replace(/\s+/g, " ").trim();
-        if (t && parts.indexOf(t) < 0) parts.push(t);
+      var limit = headerHeight > 0 ? headerHeight : 1;
+      for (var hr = 0; hr < limit; hr++) {
+        var t = at(c, hr);
+        if (!t || isChromeLabel(t) || looksNumericLabel(t)) continue;
+        if (parts.indexOf(t) < 0) parts.push(t);
       }
-      var name = parts.join(" / ") || "c" + c;
-      rawNames.push(name);
+      if (!parts.length) {
+        // row-header columns still need a name from their header cell
+        var fallback = at(c, 0) || (c < headerWidth ? "row" : "c" + c);
+        if (!isChromeLabel(fallback)) parts.push(fallback);
+      }
+      rawNames.push(parts.join(" / ") || "c" + c);
     }
 
-    // Drop chrome labels (Close button etc.)
     var keepIdx = [];
     var filteredNames = [];
     for (var i = 0; i < rawNames.length; i++) {
-      if (i >= headerWidth && isChromeLabel(rawNames[i])) continue;
+      if (!rawNames[i] || isChromeLabel(rawNames[i])) continue;
       keepIdx.push(i);
       filteredNames.push(rawNames[i]);
     }
@@ -244,27 +266,15 @@
     var columns = uniqueNames(filteredNames);
 
     var rows = [];
-    for (var r = headerHeight; r < cells.length; r++) {
-      var crow = cells[r];
-      if (!Array.isArray(crow)) continue;
+    for (var r = headerHeight; r < rowCount; r++) {
       var obj = {};
       var any = false;
-      var anyAmount = false;
       for (var k = 0; k < keepIdx.length; k++) {
-        var ci = keepIdx[k];
-        var val = cellText(crow[ci]);
-        val = String(val).replace(/\s+/g, " ").trim();
+        var val = at(keepIdx[k], r);
         obj[columns[k]] = val;
         if (val) any = true;
-        if (ci >= headerWidth && val && /[\d]/.test(val)) anyAmount = true;
       }
-      // skip empty / spacer rows
-      if (!any) continue;
-      // keep total rows and data rows
-      rows.push(obj);
-      if (!anyAmount && headerWidth > 0) {
-        // still keep — row headers alone can be useful; amounts may be blank for subheads
-      }
+      if (any) rows.push(obj);
     }
     if (!rows.length) return null;
     return {
@@ -277,10 +287,60 @@
     };
   }
 
+  function isPercentLabel(s) {
+    return /^\d{1,3}([.,]\d+)?\s*%$/.test(normLabel(s));
+  }
+
+  function isMoneyLabel(s) {
+    var t = normLabel(s);
+    return /руб/i.test(t) || /^-?\d{1,3}(\s\d{3})+([.,]\d+)?$/.test(t);
+  }
+
+  function isRegionName(s) {
+    var t = normLabel(s);
+    if (!t || t.length > 40) return false;
+    if (isPercentLabel(t) || isMoneyLabel(t) || looksNumericLabel(t)) return false;
+    if (isChromeLabel(t)) return false;
+    return /[A-Za-zА-Яа-яЁё]/.test(t);
+  }
+
+  /**
+   * Map overlay texts in paint order: Name, "7 090,57 руб.", "31,0%", next name...
+   */
+  function pairRegionLabels(lines) {
+    var regions = [];
+    var cur = null;
+    function flush() {
+      if (cur && cur.name) regions.push(cur);
+      cur = null;
+    }
+    (lines || []).forEach(function (line) {
+      var t = normLabel(line);
+      if (!t) return;
+      if (isRegionName(t)) {
+        flush();
+        cur = { name: t, amount: null, percent: null, value: null };
+        return;
+      }
+      if (!cur) return;
+      if (isPercentLabel(t) && !cur.percent) {
+        cur.percent = t;
+        return;
+      }
+      if ((isMoneyLabel(t) || looksNumericLabel(t)) && !cur.amount) {
+        cur.amount = t;
+        cur.value = t;
+      }
+    });
+    flush();
+    return regions;
+  }
+
   var api = {
     decodeExportData: decodeExportData,
     parseExportJson: parseExportJson,
     parsePivotViewerData: parsePivotViewerData,
+    pairRegionLabels: pairRegionLabels,
     isChromeLabel: isChromeLabel,
   };
 

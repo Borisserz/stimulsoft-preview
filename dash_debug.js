@@ -1325,6 +1325,59 @@
     });
   }
 
+  function regionsFromCache(parsed) {
+    if (!parsed || !parsed.rows || !parsed.rows.length) return [];
+    var cols = parsed.columns || [];
+    return parsed.rows
+      .map(function (row) {
+        var name = null;
+        var amount = null;
+        var percent = null;
+        cols.forEach(function (c) {
+          var v = row[c];
+          if (v == null || v === "") return;
+          var s = String(v).replace(/\s+/g, " ").trim();
+          var ck = String(c).toLowerCase();
+          if (!name && /name|имя|регион|область|key/.test(ck) && /[A-Za-zА-Яа-яЁё]/.test(s))
+            name = s;
+          else if (!percent && /%|дол|share|percent/.test(ck)) percent = s;
+          else if (!amount && /value|факт|сумм|amount|знач/.test(ck)) amount = s;
+        });
+        if (!name) {
+          cols.forEach(function (c) {
+            var s = String(row[c] == null ? "" : row[c]).trim();
+            if (!name && /[A-Za-zА-Яа-яЁё]/.test(s) && !/^\d/.test(s)) name = s;
+          });
+        }
+        if (!name) return null;
+        return { name: name, amount: amount, percent: percent, value: amount || percent };
+      })
+      .filter(function (r) {
+        return r && r.name;
+      });
+  }
+
+  function mergeMapRegions(painted, cached) {
+    var by = {};
+    var order = [];
+    function take(r) {
+      if (!r || !r.name) return;
+      if (!by[r.name]) {
+        by[r.name] = { name: r.name, amount: null, percent: null, value: null };
+        order.push(r.name);
+      }
+      var dst = by[r.name];
+      if (r.amount && !dst.amount) dst.amount = r.amount;
+      if (r.percent && !dst.percent) dst.percent = r.percent;
+      if (r.value && !dst.value) dst.value = r.value;
+    }
+    (painted || []).forEach(take);
+    (cached || []).forEach(take);
+    return order.map(function (n) {
+      return by[n];
+    });
+  }
+
   function enrichViewportTables(vp) {
     if (!vp || !Array.isArray(vp.elements)) {
       return Promise.resolve(vp);
@@ -1333,6 +1386,54 @@
     var jobs = [];
     vp.elements.forEach(function (el, idx) {
       if (!el) return;
+      if (el.type === "StiRegionMapElement" || el.type === "StiOnlineMapElement") {
+        jobs.push(
+          (function (mapEl) {
+            var component = resolveTableComponent(mapEl.name);
+            if (!component) {
+              vp.export_debug.push({
+                name: mapEl.name,
+                ok: !!(mapEl.regions && mapEl.regions.length),
+                capture: mapEl.capture || "map_labels",
+                rows: mapEl.row_count || 0,
+                reason: mapEl.regions && mapEl.regions.length ? "ok_map_labels" : "no_component",
+                type: mapEl.type,
+              });
+              return Promise.resolve();
+            }
+            return loadTableFromDataCache(component).then(function (fromCache) {
+              var cached = regionsFromCache(fromCache && fromCache.parsed);
+              var merged = mergeMapRegions(mapEl.regions || [], cached);
+              var reason =
+                (mapEl.regions && mapEl.regions.length ? "map_labels" : "no_labels") +
+                "+" +
+                ((fromCache && fromCache.reason) || "no_cache");
+              if (merged.length) {
+                mapEl.regions = merged;
+                mapEl.columns = ["name", "amount", "percent", "value"];
+                mapEl.rows = merged;
+                mapEl.row_count = merged.length;
+                mapEl.capture =
+                  mapEl.regions.some(function (r) {
+                    return r.percent;
+                  })
+                    ? "map_labels"
+                    : "map_cache";
+                vp.elements[idx] = mapEl;
+              }
+              vp.export_debug.push({
+                name: mapEl.name,
+                ok: merged.length > 0,
+                capture: mapEl.capture,
+                rows: merged.length,
+                reason: reason,
+                type: mapEl.type,
+              });
+            });
+          })(el)
+        );
+        return;
+      }
       if (
         el.type !== "StiTableElement" &&
         el.type !== "StiPivotTableElement"
@@ -1393,6 +1494,52 @@
     return arr.filter(function (f) {
       return f && f.value !== undefined && f.value !== null && f.value !== "";
     });
+  }
+
+  function captureMapRegions(domEl) {
+    var api = window.dashExportJson;
+    if (!domEl || !api || typeof api.pairRegionLabels !== "function") return [];
+    var lines = [];
+    var seen = {};
+    function pushLine(t) {
+      t = String(t || "").replace(/\s+/g, " ").trim();
+      if (!t || t.length > 80 || seen[t]) return;
+      seen[t] = true;
+      lines.push(t);
+    }
+    var nodes = domEl.getElementsByTagName("*");
+    for (var i = 0; i < nodes.length; i++) {
+      var node = nodes[i];
+      var tag = (node.tagName || "").toLowerCase();
+      if (
+        tag !== "text" &&
+        tag !== "tspan" &&
+        tag !== "title" &&
+        tag !== "div" &&
+        tag !== "span"
+      ) {
+        continue;
+      }
+      var childEls = node.children || [];
+      if (childEls.length) continue;
+      pushLine(node.textContent);
+    }
+    var regions = api.pairRegionLabels(lines);
+    // Attach elementvalue when the geom's argument matches a region name
+    if (regions.length) {
+      var byName = {};
+      regions.forEach(function (r) {
+        byName[r.name] = r;
+      });
+      for (var j = 0; j < nodes.length; j++) {
+        var n = nodes[j];
+        if (!n.getAttribute) continue;
+        var a = n.getAttribute("elementargument");
+        var v = n.getAttribute("elementvalue");
+        if (a && v && byName[a] && !byName[a].value) byName[a].value = v;
+      }
+    }
+    return regions;
   }
 
   function visibleText(el, maxLen) {
@@ -1456,6 +1603,27 @@
       // Short label only — not a full table dump
       var vt = visibleText(domEl, 160);
       if (vt && out.text == null && out.value == null) out.text = vt;
+      if (type === "StiRegionMapElement" || type === "StiOnlineMapElement") {
+        var regions = captureMapRegions(domEl);
+        if (regions.length) {
+          out.regions = regions;
+          out.columns = ["name", "amount", "percent", "value"];
+          out.rows = regions;
+          out.row_count = regions.length;
+          out.capture = "map_labels";
+          out.text =
+            regions
+              .map(function (r) {
+                return (
+                  r.name +
+                  (r.amount ? " " + r.amount : "") +
+                  (r.percent ? " " + r.percent : "")
+                );
+              })
+              .join("; ")
+              .slice(0, 500);
+        }
+      }
       if (type === "StiChartElement" && ca.data) {
         var chartGrid = parseGridData(ca.data);
         if (chartGrid && chartGrid.row_count > 0) {
