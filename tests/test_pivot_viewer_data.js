@@ -428,6 +428,49 @@ ok(
   "pinsk keeps 7220,9"
 );
 ok(mod.pickPivotSource([pinskStub]) == null, "stub alone rejected");
+
+var shiftedHtml = {
+  capture: "html_grid",
+  columns: [
+    "Консолидированный / Факт (руб.)",
+    "Консолидированный / План (руб.)",
+    "Местные / Факт (руб.)",
+  ],
+  rows: [
+    {
+      "Консолидированный / Факт (руб.)": "29 370,1",
+      "Консолидированный / План (руб.)": "168 668,3",
+      "Местные / Факт (руб.)": "",
+    },
+    {
+      "Консолидированный / Факт (руб.)": "29 370,1",
+      "Консолидированный / План (руб.)": "168 668,3",
+      "Местные / Факт (руб.)": "",
+    },
+    {
+      "Консолидированный / Факт (руб.)": "142 218,4",
+      "Консолидированный / План (руб.)": "56 832,4",
+      "Местные / Факт (руб.)": "",
+    },
+    {
+      "Консолидированный / Факт (руб.)": "142 218,4",
+      "Консолидированный / План (руб.)": "56 832,4",
+      "Местные / Факт (руб.)": "",
+    },
+  ],
+  row_count: 4,
+};
+var goodPivot = {
+  capture: "pivot_viewer",
+  columns: ["Наименование платежа", "Факт (руб.)"],
+  rows: [{ "Наименование платежа": "НДС", "Факт (руб.)": "94 073,0" }],
+  row_count: 1,
+};
+ok(mod.pickPivotSource([shiftedHtml]) == null, "shifted html rejected");
+ok(
+  mod.pickPivotSource([shiftedHtml, goodPivot]).capture === "pivot_viewer",
+  "pivot beats shifted html"
+);
 ok(mod.mapKeyToRu("GomelskayaVoblasts") === "Гомельская", "gomel");
 
 ok(mod.isChromeLabel("Close") === true, "Close is chrome");

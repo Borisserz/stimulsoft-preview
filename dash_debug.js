@@ -727,47 +727,124 @@
     return pages[idx] || { index: idx, name: "" };
   }
 
-  /** Stimulsoft map drill is path.onclick, value taken from elementident. */
-  function atlasClickGeom(re) {
-    var nodes = document.getElementsByTagName("*");
+  function atlasHostType(node) {
+    var cur = node;
+    for (var i = 0; i < 14 && cur; i++) {
+      if (cur.elementAttributes && cur.elementAttributes.type) {
+        return String(cur.elementAttributes.type);
+      }
+      cur = cur.parentElement || cur.parentNode;
+    }
+    return "";
+  }
+
+  /** SVG shapes that carry Stimulsoft drill attributes. Not table text. */
+  function atlasMapGeoms() {
+    var out = [];
+    var tags = ["path", "polygon", "circle", "ellipse", "rect"];
+    for (var t = 0; t < tags.length; t++) {
+      var nodes = document.getElementsByTagName(tags[t]);
+      for (var i = 0; i < nodes.length; i++) {
+        var n = nodes[i];
+        if (!n.getAttribute) continue;
+        var arg = n.getAttribute("elementargument") || "";
+        var ident = n.getAttribute("elementident") || "";
+        var value = n.getAttribute("elementvalue") || "";
+        if (!arg && !ident && !value) continue;
+        out.push(n);
+      }
+    }
+    return out;
+  }
+
+  function atlasGeomBlob(n) {
+    if (!n || !n.getAttribute) return "";
+    return [
+      n.getAttribute("elementident") || "",
+      n.getAttribute("elementargument") || "",
+      n.getAttribute("elementvalue") || "",
+      n.getAttribute("interactiontooltip") || "",
+    ].join(" ");
+  }
+
+  function atlasFireGeom(node, via) {
+    if (!node) {
+      atlasNoteHit(null, "none");
+      return false;
+    }
+    var ident = node.getAttribute && node.getAttribute("elementident");
+    var arg = node.getAttribute && node.getAttribute("elementargument");
+    if (!ident && arg) node.setAttribute("elementident", arg);
+    if (typeof node.onclick === "function") {
+      try {
+        node.onclick.call(node);
+        atlasNoteHit(node, via || "onclick");
+        return true;
+      } catch (e1) {}
+    }
+    atlasNoteHit(node, via || "click");
+    return atlasClick(node);
+  }
+
+  /** Oblast / Minsk: only a map path, never the word in the table. */
+  function atlasClickMapRegion(re, skipRe) {
     var best = null;
     var bestLen = 9999;
-    for (var i = 0; i < nodes.length; i++) {
-      var n = nodes[i];
-      if (!n.getAttribute) continue;
-      var blob = [
-        n.getAttribute("elementident") || "",
-        n.getAttribute("elementargument") || "",
-        n.getAttribute("elementvalue") || "",
-        n.getAttribute("interactiontooltip") || "",
-      ].join(" ");
-      if (!blob.trim() || !re.test(blob)) continue;
+    var geoms = atlasMapGeoms();
+    for (var i = 0; i < geoms.length; i++) {
+      var n = geoms[i];
+      if (atlasHostType(n).indexOf("Map") < 0) continue;
+      var blob = atlasGeomBlob(n);
+      if (skipRe && skipRe.test(blob)) continue;
+      if (!re.test(blob)) continue;
       if (blob.length < bestLen) {
         best = n;
         bestLen = blob.length;
       }
     }
-    if (!best) best = atlasFindText(re);
-    if (!best) {
-      atlasNoteHit(null, "none");
-      return false;
-    }
-    var ident = best.getAttribute && best.getAttribute("elementident");
-    var arg = best.getAttribute && best.getAttribute("elementargument");
-    if (!ident && arg) best.setAttribute("elementident", arg);
-    var cur = best;
-    for (var up = 0; up < 8 && cur; up++) {
-      if (typeof cur.onclick === "function") {
-        try {
-          cur.onclick.call(cur);
-          atlasNoteHit(cur, "onclick");
-          return true;
-        } catch (e1) {}
+    return atlasFireGeom(best, "map-onclick");
+  }
+
+  /**
+   * Rayon: chart bar or pivot cell «ИМНС по …».
+   * Map paths are skipped so a country outline is not clicked again.
+   */
+  function atlasClickDistrict(re) {
+    var best = null;
+    var bestLen = 9999;
+    var nodes = document.getElementsByTagName("*");
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i];
+      var host = atlasHostType(n);
+      if (!host || host.indexOf("Map") >= 0) continue;
+      if (host.indexOf("Chart") < 0 && host.indexOf("Pivot") < 0 && host.indexOf("Table") < 0) {
+        continue;
       }
-      cur = cur.parentElement || cur.parentNode;
+      var own = atlasGeomBlob(n);
+      var text = "";
+      if (!n.children || n.children.length <= 2) {
+        text = String(n.textContent || "").replace(/\s+/g, " ").trim();
+        if (text.length > 80) text = "";
+      }
+      var blob = own + " " + text;
+      if (!re.test(blob)) continue;
+      var target = n;
+      if (typeof n.onclick !== "function") {
+        var cur = n;
+        for (var up = 0; up < 5 && cur; up++) {
+          if (typeof cur.onclick === "function" && atlasHostType(cur).indexOf("Map") < 0) {
+            target = cur;
+            break;
+          }
+          cur = cur.parentElement || cur.parentNode;
+        }
+      }
+      if (blob.length < bestLen) {
+        best = target;
+        bestLen = blob.length;
+      }
     }
-    atlasNoteHit(best, "click");
-    return atlasClick(best);
+    return atlasFireGeom(best, "row-onclick");
   }
 
   function atlasFindMap(re) {
@@ -878,15 +955,15 @@
         var tag = label;
         if (!res.hit) tag = label + " (net klikaemyj oblasti)";
         else if (!res.drilled) tag = label + " (klik ne otkryl proval)";
-        return captureAtlasPage(tag, "drill", atlasCurrentPage());
-      })
-      .then(function (rec) {
-        collected.push(rec);
+        return captureAtlasPage(tag, "drill", atlasCurrentPage()).then(function (rec) {
+          collected.push(rec);
+          return res;
+        });
       });
   }
 
   function runAtlasAuto() {
-    showText("ATLAS: pages, potom proval Brest i Pinsk, potom knopki...", "ATLAS");
+    showText("ATLAS: pages, potom kazhdaya oblast i rayon vnutri...", "ATLAS");
     var pages = listReportPages();
     var chain = Promise.resolve();
     var collected = [];
@@ -916,14 +993,39 @@
     chain = chain.then(function () {
       probeBox = atlasProbe();
     });
-    chain = chain.then(function () {
-      return atlasDrillShot(collected, "drill Brest", function () {
-        return atlasClickGeom(/brest|брест|brestska/i);
+    var oblasts = [
+      { label: "Brest", re: /brest|брест|brestska/i, district: /пинск|pinsk/i },
+      { label: "Vitebsk", re: /viteb|витеб|vitseb/i, district: /имнс/i },
+      { label: "Gomel", re: /gomel|гомел/i, district: /имнс/i },
+      { label: "Grodno", re: /grodn|гродн/i, district: /имнс/i },
+      { label: "Mogilev", re: /mogil|могил|mahil/i, district: /имнс/i },
+      { label: "Minskaya", re: /минская|minskaya|минской/i, district: /имнс/i },
+      {
+        label: "Minsk",
+        re: /минск|minsk/i,
+        skip: /минская|minskaya|минской/i,
+        district: /имнс/i,
+      },
+    ];
+    oblasts.forEach(function (ob) {
+      chain = chain.then(function () {
+        return gotoReportPage(page0.index);
       });
-    });
-    chain = chain.then(function () {
-      return atlasDrillShot(collected, "drill Pinsk", function () {
-        return atlasClickGeom(/pinsk|пинск|пинскому/i);
+      chain = chain.then(function () {
+        return atlasWaitUntil(function () {
+          return atlasMapGeoms().length > 0;
+        }, 5000);
+      });
+      chain = chain.then(function () {
+        return atlasDrillShot(collected, "drill " + ob.label, function () {
+          return atlasClickMapRegion(ob.re, ob.skip);
+        });
+      });
+      chain = chain.then(function (res) {
+        if (!res || !res.drilled) return null;
+        return atlasDrillShot(collected, "drill " + ob.label + " rayon", function () {
+          return atlasClickDistrict(ob.district);
+        });
       });
     });
     chain = chain.then(function () {

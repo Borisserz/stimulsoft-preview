@@ -931,6 +931,39 @@
     return mergeRegionLists(primary, labels, { allowNew: true });
   }
 
+  /** html_grid that duplicated the fact column and left «Местные» empty. */
+  function htmlGridLooksShifted(parsed) {
+    if (!parsed || parsed.capture !== "html_grid") return false;
+    if (labelColumnLooksNumeric(parsed)) return true;
+    var cols = parsed.columns || [];
+    var local = null;
+    var fact = null;
+    for (var i = 0; i < cols.length; i++) {
+      var name = String(cols[i]).toLowerCase();
+      if (!local && name.indexOf("местн") >= 0 && name.indexOf("факт") >= 0) local = cols[i];
+      if (
+        !fact &&
+        name.indexOf("факт") >= 0 &&
+        name.indexOf("местн") < 0 &&
+        name.indexOf("республик") < 0
+      ) {
+        fact = cols[i];
+      }
+    }
+    var rows = parsed.rows || [];
+    if (!local || rows.length < 4) return false;
+    var emptyLocal = 0;
+    var dup = 0;
+    var prev = null;
+    for (var r = 0; r < rows.length; r++) {
+      if (!rows[r][local]) emptyLocal++;
+      var value = fact ? rows[r][fact] : null;
+      if (prev && value && value === prev) dup++;
+      prev = value;
+    }
+    return emptyLocal >= rows.length * 0.7 && dup >= 2;
+  }
+
   function pickPivotSource(list) {
     var rank = {
       pivot_viewer: 3,
@@ -943,6 +976,7 @@
     var bestRank = -1;
     (list || []).forEach(function (p) {
       if (!p || !p.row_count) return;
+      if (htmlGridLooksShifted(p)) return;
       var sc = pivotDataScore(p);
       // Total/Итог with 0,0 only — not real drill data (Pinsk case).
       if (sc < 10) return;
