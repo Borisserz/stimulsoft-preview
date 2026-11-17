@@ -161,8 +161,46 @@ class AtlasPackTests(unittest.TestCase):
         text = build_atlas_text(added)
         self.assertIn("ATLAS", text)
         self.assertIn("drill Pinsk", text)
-        self.assertIn("CHECKLIST", text)
         self.assertIn("PivotTableElement108", text)
+        self.assertIn("С выполнением плана", text)
+        self.assertIn("tablica", text)
+
+    def test_second_render_keeps_table_numbers(self) -> None:
+        stored = apply_atlas_post(
+            None,
+            {
+                "replace": True,
+                "pages": [
+                    {
+                        "label": "page0",
+                        "viewport": {
+                            "elements": [
+                                {
+                                    "name": "CardsElement2",
+                                    "type": "StiCardsElement",
+                                    "text": "224 711,64 руб.",
+                                },
+                                {
+                                    "name": "PivotTableElement25",
+                                    "type": "StiPivotTableElement",
+                                    "capture": "pivot_viewer",
+                                    "columns": ["Платёж", "Факт"],
+                                    "rows": [
+                                        {"Платёж": "НДС", "Факт": "29 370,1"},
+                                        {"Платёж": "Итого", "Факт": "722 087,2"},
+                                    ],
+                                    "row_count": 2,
+                                },
+                            ]
+                        },
+                    }
+                ],
+            },
+        )
+        text = build_atlas_text(stored)
+        self.assertIn("224 711,64", text)
+        self.assertIn("29 370,1", text)
+        self.assertIn("722 087,2", text)
 
     def test_normalize_empty(self) -> None:
         self.assertEqual(normalize_atlas(None)["page_count"], 0)

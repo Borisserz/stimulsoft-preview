@@ -62,6 +62,14 @@ def normalize_atlas_page(raw: Any) -> dict[str, Any] | None:
     interaction = raw.get("interaction")
     if interaction is not None and not isinstance(interaction, dict):
         interaction = {"raw": interaction}
+    # Text render calls normalize again. The stored page has no viewport,
+    # so a second facts_from_viewport() would wipe the rows just computed.
+    if isinstance(raw.get("viewport"), dict):
+        facts = facts_from_viewport(raw["viewport"])
+    elif isinstance(raw.get("facts"), dict):
+        facts = raw["facts"]
+    else:
+        facts = facts_from_viewport(vp if isinstance(vp, dict) else {})
     return {
         "page_index": page_index,
         "page_name": str(raw.get("page_name") or "") or None,
@@ -71,7 +79,7 @@ def normalize_atlas_page(raw: Any) -> dict[str, Any] | None:
         "filters": {"panel": dict(panel), "dashboard": list(dashboard)},
         "interaction": interaction,
         "structure": structure,
-        "facts": facts_from_viewport(vp if isinstance(vp, dict) else {}),
+        "facts": facts,
         "highlights": raw.get("highlights")
         if isinstance(raw.get("highlights"), dict)
         else _highlights_from_structure(structure),
@@ -122,17 +130,10 @@ def build_atlas_text(atlas: dict[str, Any] | None) -> str:
     at = normalize_atlas(atlas or {})
     lines: list[str] = []
     lines.append("========== ATLAS DASHBORDA ==========")
-    lines.append("Avto: vse pages MRT. Manual: Dinamika / drill / knopki.")
+    lines.append("Snimki: pages, knopki, proval Brest i Pinsk.")
+    lines.append("Pustye oblasti v etoj baze — net dannyh, ne oshibka parsera.")
     lines.append(f"captured_at = {at.get('captured_at')}")
     lines.append(f"snapshots = {at.get('page_count')}")
-    lines.append("")
-    lines.append("CHECKLIST (posle klika — Add snapshot na /atlas):")
-    lines.append("  [ ] page + Obshhie dannye")
-    lines.append("  [ ] page + Dinamika")
-    lines.append("  [ ] drill Brest")
-    lines.append("  [ ] drill Pinsk")
-    lines.append("  [ ] S/Bez vypolneniya plana")
-    lines.append("  [ ] Detalizaciya")
     lines.append("")
     for i, page in enumerate(at.get("pages") or []):
         lines.append("-" * 42)
@@ -154,17 +155,22 @@ def build_atlas_text(atlas: dict[str, Any] | None) -> str:
         if isinstance(inter, dict) and inter.get("action"):
             lines.append(f"   last_action={inter.get('action')}")
         facts = page.get("facts") if isinstance(page.get("facts"), dict) else {}
-        if facts.get("cards"):
-            lines.append(
-                "   CARDS: "
-                + " | ".join(
-                    f"{c.get('name')}={c.get('text')}" for c in facts["cards"][:8]
-                )
-            )
+        named_buttons = []
+        for btn in facts.get("buttons") or []:
+            if isinstance(btn, dict) and btn.get("text") and btn["text"] not in named_buttons:
+                named_buttons.append(str(btn["text"]))
+        if named_buttons:
+            lines.append("   knopki: " + " | ".join(named_buttons[:10]))
+        if facts.get("labels"):
+            lines.append("   nadpisi: " + " | ".join(facts["labels"][:8]))
         if facts.get("kpi"):
             lines.append(
-                "   KPI: "
-                + " | ".join(f"{c.get('name')}={c.get('text')}" for c in facts["kpi"][:8])
+                "   kpi: " + " | ".join(str(c.get("text") or "") for c in facts["kpi"][:8])
+            )
+        if facts.get("cards"):
+            lines.append(
+                "   kartochki: "
+                + " | ".join(str(c.get("text") or "") for c in facts["cards"][:8])
             )
         mp = facts.get("map") if isinstance(facts.get("map"), dict) else {}
         if mp.get("with_numbers"):
@@ -173,51 +179,31 @@ def build_atlas_text(atlas: dict[str, Any] | None) -> str:
                 bits.append(
                     f"{reg.get('name')} {reg.get('amount') or ''} {reg.get('percent') or ''}".strip()
                 )
-            lines.append("   MAP CIFRY: " + " | ".join(bits))
+            lines.append("   karta cifry: " + " | ".join(bits))
         if mp.get("names_only"):
-            lines.append(
-                "   MAP BEZ CIFR (kontur, ne vydumyvat'): "
-                + ", ".join(mp["names_only"][:12])
-            )
+            lines.append("   karta kontur: " + ", ".join(mp["names_only"][:12]))
         for table in facts.get("tables") or []:
             lines.append(
-                f"   TABLE {table.get('name')} status={table.get('status')} "
-                f"rows={table.get('row_count')} capture={table.get('capture')}"
+                f"   tablica {table.get('name')} — {table.get('status')} "
+                f"strok={table.get('row_count')} capture={table.get('capture')}"
             )
             if table.get("columns"):
-                lines.append("      columns=" + ", ".join(table["columns"][:12]))
-            for i, row in enumerate((table.get("rows") or [])[:5]):
-                lines.append(f"      {i+1}) {row}")
-            extra = int(table.get("row_count") or 0) - 5
+                lines.append("      kolonki: " + " | ".join(table["columns"][:8]))
+            rows = list(table.get("rows") or [])
+            shown = rows[:6]
+            for row in rows[6:]:
+                blob = " ".join(str(v) for v in row.values()).lower()
+                if "итог" in blob or "total" in blob:
+                    shown.append(row)
+                    break
+            for n, row in enumerate(shown, start=1):
+                lines.append(f"      {n}) {row}")
+            extra = int(table.get("row_count") or 0) - len(shown)
             if extra > 0:
                 lines.append(f"      ... eshche {extra} strok v JSON /api/atlas")
-        hi = page.get("highlights") or {}
-        if hi.get("button_texts"):
-            lines.append("   buttons: " + " | ".join(hi["button_texts"][:12]))
-        if hi.get("pivot_names"):
-            lines.append("   pivots: " + ", ".join(hi["pivot_names"][:10]))
-        if hi.get("map_names"):
-            lines.append("   maps: " + ", ".join(hi["map_names"][:6]))
-        if hi.get("map_region_names"):
-            lines.append("   map_regions: " + ", ".join(hi["map_region_names"][:12]))
         st = page.get("structure") or {}
         els = st.get("elements") if isinstance(st.get("elements"), list) else []
-        lines.append(f"   elements={len(els)}")
-        for el in els[:40]:
-            if not isinstance(el, dict):
-                continue
-            bits = [f"[{el.get('name')}]", f"type={el.get('type')}"]
-            if el.get("text"):
-                bits.append(f"text={el.get('text')!r}")
-            if "checked" in el:
-                bits.append(f"checked={el.get('checked')}")
-            if el.get("row_count") is not None:
-                bits.append(f"rows={el.get('row_count')}")
-                if el.get("capture"):
-                    bits.append(f"capture={el.get('capture')}")
-            lines.append("   " + " ".join(bits))
-        if len(els) > 40:
-            lines.append(f"   ... +{len(els) - 40} elements")
+        lines.append(f"   elementy={len(els)} (polnyj spisok v JSON /api/atlas)")
         lines.append("")
     lines.append("JSON: /api/atlas")
     lines.append("Tekst: /api/atlas-text")

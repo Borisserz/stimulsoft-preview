@@ -71,6 +71,7 @@ def facts_from_viewport(viewport: dict[str, Any] | None) -> dict[str, Any]:
     cards: list[dict[str, Any]] = []
     kpi: list[dict[str, Any]] = []
     buttons: list[dict[str, Any]] = []
+    labels: list[str] = []
     map_numbers: list[dict[str, Any]] = []
     map_names: list[str] = []
     seen_regions: set[str] = set()
@@ -94,6 +95,9 @@ def facts_from_viewport(viewport: dict[str, Any] | None) -> dict[str, Any]:
                     "checked": el.get("checked") if "checked" in el else None,
                 }
             )
+        elif "Text" in etype and text and len(text) <= 90:
+            if text not in labels:
+                labels.append(text)
         elif "Map" in etype:
             for reg in el.get("regions") or []:
                 if not isinstance(reg, dict) or not reg.get("name"):
@@ -151,6 +155,7 @@ def facts_from_viewport(viewport: dict[str, Any] | None) -> dict[str, Any]:
         "cards": cards,
         "kpi": kpi,
         "buttons": buttons,
+        "labels": labels,
         "map": {"with_numbers": map_numbers, "names_only": map_names},
         "tables": tables,
     }

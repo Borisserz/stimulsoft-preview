@@ -545,6 +545,65 @@
     return true;
   }
 
+  function atlasWaitUntil(pred, ms) {
+    var start = Date.now();
+    return new Promise(function tick(resolve) {
+      var ok = false;
+      try {
+        ok = !!pred();
+      } catch (e) {
+        ok = false;
+      }
+      if (ok || Date.now() - start >= ms) resolve(ok);
+      else setTimeout(function () { tick(resolve); }, 250);
+    });
+  }
+
+  function atlasCurrentPage() {
+    var pages = listReportPages();
+    var jo = findViewerJsObject();
+    var idx =
+      jo && jo.reportParams && typeof jo.reportParams.pageNumber === "number"
+        ? jo.reportParams.pageNumber
+        : 0;
+    return pages[idx] || { index: idx, name: "" };
+  }
+
+  /** Stimulsoft map drill is path.onclick, value taken from elementident. */
+  function atlasClickGeom(re) {
+    var nodes = document.getElementsByTagName("*");
+    var best = null;
+    var bestLen = 9999;
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i];
+      if (!n.getAttribute) continue;
+      var blob = [
+        n.getAttribute("elementident") || "",
+        n.getAttribute("elementargument") || "",
+        n.getAttribute("elementvalue") || "",
+        n.getAttribute("interactiontooltip") || "",
+      ].join(" ");
+      if (!blob.trim() || !re.test(blob)) continue;
+      if (blob.length < bestLen) {
+        best = n;
+        bestLen = blob.length;
+      }
+    }
+    if (!best) best = atlasFindText(re);
+    if (!best) return false;
+    var cur = best;
+    for (var up = 0; up < 8 && cur; up++) {
+      if (typeof cur.onclick === "function") {
+        try {
+          cur.onclick.call(cur);
+          return true;
+        } catch (e1) {}
+      }
+      cur = cur.parentElement || cur.parentNode;
+    }
+    return atlasClick(best);
+  }
+
   function atlasFindMap(re) {
     var nodes = document.getElementsByTagName("*");
     for (var i = 0; i < nodes.length; i++) {
@@ -632,17 +691,29 @@
   }
 
   function atlasDrillShot(collected, label, clicker) {
-    return atlasWait(400)
+    var before = "";
+    return atlasWait(500)
       .then(function () {
-        clicker();
-        return atlasWait(3200);
+        before = (lastInteractionDump && lastInteractionDump.action) || "";
+        var hit = clicker();
+        return atlasWaitUntil(function () {
+          var action = (lastInteractionDump && lastInteractionDump.action) || "";
+          return hit && /Drill/i.test(action) && action !== before;
+        }, 7000).then(function (drilled) {
+          return { hit: hit, drilled: drilled };
+        });
       })
-      .then(function () {
+      .then(function (res) {
         atlasExpandTables();
-        return atlasWait(1600);
+        return atlasWait(1500).then(function () {
+          return res;
+        });
       })
-      .then(function () {
-        return captureAtlasPage(label, "drill", { index: 0, name: label });
+      .then(function (res) {
+        var tag = label;
+        if (!res.hit) tag = label + " (net klikaemyj oblasti)";
+        else if (!res.drilled) tag = label + " (klik ne otkryl proval)";
+        return captureAtlasPage(tag, "drill", atlasCurrentPage());
       })
       .then(function (rec) {
         collected.push(rec);
@@ -650,10 +721,7 @@
   }
 
   function runAtlasAuto() {
-    showText(
-      "ATLAS: pages, knopki vypolnenie/detalizaciya/procent, potom Brest i Pinsk...",
-      "ATLAS"
-    );
+    showText("ATLAS: pages, potom proval Brest i Pinsk, potom knopki...", "ATLAS");
     var pages = listReportPages();
     var chain = Promise.resolve();
     var collected = [];
@@ -682,7 +750,17 @@
       return gotoReportPage(page0.index);
     });
     chain = chain.then(function () {
-      return atlasClickLabeled(/общие данные/i);
+      return atlasDrillShot(collected, "drill Brest", function () {
+        return atlasClickGeom(/brest|брест|brestska/i);
+      });
+    });
+    chain = chain.then(function () {
+      return atlasDrillShot(collected, "drill Pinsk", function () {
+        return atlasClickGeom(/pinsk|пинск|пинскому/i);
+      });
+    });
+    chain = chain.then(function () {
+      return gotoReportPage(page0.index);
     });
     chain = chain.then(function () {
       return atlasButtonShot(
@@ -696,25 +774,18 @@
       return atlasButtonShot(collected, "obshchie detalizaciya", /детализ/i, page0);
     });
     chain = chain.then(function () {
-      return atlasDrillShot(collected, "drill Brest", function () {
-        atlasClick(atlasFindMap(/brest|брест/i));
-      });
-    });
-    chain = chain.then(function () {
-      return atlasDrillShot(collected, "drill Pinsk", function () {
-        atlasClick(
-          atlasFindMap(/pinsk|пинск/i) || atlasFindText(/пинск/i)
-        );
-      });
-    });
-    chain = chain.then(function () {
       return gotoReportPage(dyn.index);
     });
     chain = chain.then(function () {
-      return atlasClickLabeled(/^динамика$/i);
+      return atlasButtonShot(
+        collected,
+        "dinamika otklonenie v %",
+        /отклонени[ея]\s+в\s*%/i,
+        dyn
+      );
     });
     chain = chain.then(function () {
-      return atlasButtonShot(collected, "dinamika otklonenie", /отклонен/i, dyn);
+      return atlasButtonShot(collected, "dinamika otklonenie", /^отклонение$/i, dyn);
     });
     chain = chain.then(function () {
       return atlasButtonShot(collected, "dinamika procent", /процент/i, dyn);
@@ -2014,6 +2085,19 @@
     return fromAttrs.length ? fromAttrs : labeled;
   }
 
+  function buttonLeafText(el) {
+    if (!el || !el.querySelectorAll) return null;
+    var nodes = el.querySelectorAll("div, span, text, tspan");
+    var best = "";
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].children && nodes[i].children.length) continue;
+      var t = String(nodes[i].textContent || "").replace(/\s+/g, " ").trim();
+      if (!t || t.length > 40) continue;
+      if (!best || t.length < best.length) best = t;
+    }
+    return best || null;
+  }
+
   function visibleText(el, maxLen) {
     try {
       var t = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
@@ -2077,6 +2161,10 @@
         if (comp.text && out.text == null) out.text = String(comp.text);
         if (comp.checked !== undefined) out.checked = !!comp.checked;
         if (comp.group) out.group = String(comp.group);
+      }
+      if (type.indexOf("Button") >= 0 && (out.text == null || out.text === "")) {
+        var leaf = buttonLeafText(domEl);
+        if (leaf) out.text = leaf;
       }
       if (attrs.group && !out.group) out.group = String(attrs.group);
       if (ca.group && !out.group) out.group = String(ca.group);
