@@ -47,6 +47,7 @@ from stimulsoft_reports.report.dictionary.StiVariable import StiVariable
 from stimulsoft_reports.report.enums.StiVariableType import StiVariableType
 from stimulsoft_reports.viewer import StiViewer
 
+from ask_plan import plan_ask
 from query_request import QueryFilterError, filters_from_body, viewer_path
 from llm_pack import (
     build_results_digest,
@@ -718,6 +719,24 @@ def post_viewport():
         dumps_llm_pack({"ok": True, "llm_pack": pack}).encode("utf-8"),
         content_type="application/json; charset=utf-8",
     )
+
+
+@app.post("/api/ask")
+def post_ask():
+    """Parse a sentence into panel filters and a pending region drill. Model stays off."""
+    body = request.get_json(silent=True) if request.is_json else None
+    if not isinstance(body, dict):
+        return Response("need JSON object", status=400)
+    text = body.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return Response("need text", status=400)
+    model_text = body.get("model_text")
+    if model_text is not None and not isinstance(model_text, str):
+        return Response("model_text must be a string", status=400)
+    plan = plan_ask(text, model_text=model_text)
+    if plan["params"]:
+        params_update(plan["params"], clear_results_on_change=True)
+    return jsonify({"ok": True, "ready": False, **plan})
 
 
 @app.post("/api/query")
