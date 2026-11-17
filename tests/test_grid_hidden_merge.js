@@ -7,6 +7,10 @@
 function stiCellValue(cell) {
   if (cell == null) return null;
   if (typeof cell !== "object") return cell;
+  if (cell.value !== undefined && cell.value !== null && cell.value !== "")
+    return cell.value;
+  if (cell.text !== undefined && cell.text !== null && cell.text !== "")
+    return cell.text;
   if (cell.value !== undefined && cell.value !== null) return cell.value;
   if (cell.text !== undefined && cell.text !== null) return cell.text;
   return null;
@@ -146,5 +150,27 @@ var withTotal = stiMergeVisibleHidden(
 var p2 = stiParseGrid(withTotal, "grid");
 assert(p2.row_count === 1, "totals not in body");
 assert(p2.rows[0].A === "x", "body row kept");
+
+// empty value must not hide painted text amounts
+assert(stiCellValue({ value: "", text: "1 500.50" }) === "1 500.50", "empty value→text");
+assert(stiCellValue({ value: 0, text: "x" }) === 0, "zero value kept");
+
+// Prefer pairing that brings numeric columns (simulate dg names + ca hidden amounts)
+function stiGridScore(p) {
+  if (!p) return -1;
+  var nums = 0;
+  if (p.rows && p.rows[0]) {
+    Object.keys(p.rows[0]).forEach(function (k) {
+      var v = p.rows[0][k];
+      if (typeof v === "number") nums++;
+      else if (v != null && /^-?\d+(\.\d+)?$/.test(String(v).replace(/\s/g, "").replace(",", ".")))
+        nums++;
+    });
+  }
+  return (p.columns.length || 0) * 1000 + nums * 5000 + (p.row_count || 0);
+}
+var onlyNames = stiParseGrid(visible, "names");
+var withAmounts = parsed;
+assert(stiGridScore(withAmounts) > stiGridScore(onlyNames), "amounts score higher");
 
 console.log("OK stimulsoft table model", parsed.columns, parsed.rows);

@@ -563,11 +563,43 @@
   function stiCellValue(cell) {
     if (cell == null) return null;
     if (typeof cell !== "object") return cell;
-    // Exact Stimulsoft replaceRowValues rule
+    // Stimulsoft: prefer value, but "" is useless — fall through to text
+    // (amounts often painted only in .text while .value is "")
+    if (cell.value !== undefined && cell.value !== null && cell.value !== "")
+      return cell.value;
+    if (cell.text !== undefined && cell.text !== null && cell.text !== "")
+      return cell.text;
     if (cell.value !== undefined && cell.value !== null) return cell.value;
     if (cell.text !== undefined && cell.text !== null) return cell.text;
     if (cell.image !== undefined && cell.image !== null) return cell.image;
     return null;
+  }
+
+  function stiCountNumericFields(parsed) {
+    if (!parsed || !parsed.rows || !parsed.rows.length) return 0;
+    var n = 0;
+    var sample = parsed.rows[0];
+    Object.keys(sample).forEach(function (k) {
+      var v = sample[k];
+      if (typeof v === "number") {
+        n++;
+        return;
+      }
+      if (v === null || v === undefined || v === "") return;
+      var s = String(v).replace(/\s/g, "").replace(",", ".");
+      // 1500.5 or 1 500,50-style already stripped spaces
+      if (/^-?\d+(\.\d+)?$/.test(s)) n++;
+    });
+    return n;
+  }
+
+  function stiGridScore(parsed) {
+    if (!parsed) return -1;
+    return (
+      (parsed.columns ? parsed.columns.length : 0) * 1000 +
+      stiCountNumericFields(parsed) * 5000 +
+      (parsed.row_count || 0)
+    );
   }
 
   function stiNormStr(v) {
@@ -809,21 +841,43 @@
   function captureTableElement(domEl, ca) {
     var attrs = domEl.elementAttributes || {};
     var dg = domEl.dataGrid || null;
-    // Prefer live dataGrid (post-showData); else contentAttributes snapshot
-    var visible = (dg && dg.data) || (ca && ca.data) || null;
-    var hidden = (dg && dg.hiddenData) || (ca && ca.hiddenData) || null;
-    var merged = stiMergeVisibleHidden(visible, hidden);
-    var hasHidden =
-      Array.isArray(hidden) &&
-      hidden.length > 0 &&
-      Array.isArray(hidden[0]) &&
-      hidden[0].length > 0;
-    var parsed = stiParseGrid(merged, hasHidden ? "grid+hidden" : "grid");
+    ca = ca || attrs.contentAttributes || {};
+
+    // Try ALL pairings: amounts often only in contentAttributes.hiddenData
+    // while names live on dataGrid.data (or the reverse).
+    var visibles = [dg && dg.data, ca.data];
+    var hiddens = [dg && dg.hiddenData, ca.hiddenData];
+    var best = null;
+    var bestScore = -1;
+    for (var vi = 0; vi < visibles.length; vi++) {
+      for (var hi = 0; hi < hiddens.length; hi++) {
+        var v = visibles[vi];
+        var h = hiddens[hi];
+        if (!v && !h) continue;
+        var merged = stiMergeVisibleHidden(v, h);
+        var hasH =
+          Array.isArray(h) &&
+          h.length > 0 &&
+          Array.isArray(h[0]) &&
+          h[0].length > 0;
+        var tag =
+          (v === (dg && dg.data) ? "dg" : "ca") +
+          "+" +
+          (hasH ? (h === (dg && dg.hiddenData) ? "dgHidden" : "caHidden") : "noHidden");
+        var parsed = stiParseGrid(merged, tag);
+        if (!parsed || parsed.row_count < 1) continue;
+        var sc = stiGridScore(parsed);
+        if (sc > bestScore) {
+          best = parsed;
+          bestScore = sc;
+        }
+      }
+    }
 
     // Never let HTML override a real grid — prevents amount-split-across-rows
-    if (parsed && parsed.row_count > 0) {
-      parsed.title = stiResolveTitle(domEl, attrs);
-      return parsed;
+    if (best && best.row_count > 0) {
+      best.title = stiResolveTitle(domEl, attrs);
+      return best;
     }
 
     var htmlParsed = stiScrapeHtmlFallback(domEl);
@@ -832,21 +886,12 @@
       return htmlParsed;
     }
 
-    if (parsed && parsed.columns && parsed.columns.length) {
-      return {
-        columns: parsed.columns,
-        column_meta: parsed.column_meta,
-        rows: [],
-        row_count: 0,
-        capture: "grid_empty",
-        title: stiResolveTitle(domEl, attrs),
-      };
-    }
     return {
-      columns: [],
+      columns: best && best.columns ? best.columns : [],
+      column_meta: best && best.column_meta ? best.column_meta : undefined,
       rows: [],
       row_count: 0,
-      capture: "empty",
+      capture: best ? "grid_empty" : "empty",
       title: stiResolveTitle(domEl, attrs),
     };
   }
