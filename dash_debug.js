@@ -928,8 +928,11 @@
       type === "StiTextElement" ||
       type.indexOf("Button") >= 0
     ) {
-      if (ca.value !== undefined) out.value = cellValue(ca.value) != null ? cellValue(ca.value) : ca.value;
-      if (ca.text !== undefined) out.text = cellValue(ca.text) != null ? cellValue(ca.text) : ca.text;
+      if (ca.value !== undefined)
+        out.value =
+          stiCellValue(ca.value) != null ? stiCellValue(ca.value) : ca.value;
+      if (ca.text !== undefined)
+        out.text = stiCellValue(ca.text) != null ? stiCellValue(ca.text) : ca.text;
       if (ca.series !== undefined) out.series = safeClone(ca.series);
       if (attrs.isChecked !== undefined) out.checked = !!attrs.isChecked;
       if (ca.isChecked !== undefined) out.checked = !!ca.isChecked;
