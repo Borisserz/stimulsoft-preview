@@ -57,6 +57,12 @@ from llm_pack import (
     snapshot_from_data_args,
     update_filter_state,
 )
+from atlas_pack import (
+    ATLAS_PAGE_HTML,
+    apply_atlas_post,
+    build_atlas_text,
+    normalize_atlas,
+)
 from structure_pack import (
     STRUCTURE_PAGE_HTML,
     build_structure_text,
@@ -161,6 +167,8 @@ _INTERACTIONS_MAX = 50
 _RESULTS: dict[str, Any] = {}
 # Full visible dashboard snapshot from client (source of truth for LLM/SVERKA).
 _VIEWPORT: dict[str, Any] | None = None
+# Multi-page + manual scenario inventory (ATLAS).
+_ATLAS: dict[str, Any] | None = None
 _FILTERS_UPDATED_AT: str | None = None
 _FILTER_GEN: int = 0
 _APPLIED_LOG: list[dict[str, Any]] = []
@@ -633,6 +641,45 @@ def get_structure_text():
 def structure_page():
     """Photographable page: all block/button names for the agent."""
     return Response(STRUCTURE_PAGE_HTML.encode("utf-8"), content_type="text/html; charset=utf-8")
+
+
+@app.get("/api/atlas")
+def get_atlas_json():
+    with _params_lock:
+        atlas = dict(_ATLAS) if isinstance(_ATLAS, dict) else {"pages": []}
+    return Response(
+        dumps_llm_pack(normalize_atlas(atlas)).encode("utf-8"),
+        content_type="application/json; charset=utf-8",
+    )
+
+
+@app.get("/api/atlas-text")
+def get_atlas_text():
+    with _params_lock:
+        atlas = dict(_ATLAS) if isinstance(_ATLAS, dict) else {"pages": []}
+    text = build_atlas_text(atlas)
+    return Response(text.encode("utf-8"), content_type="text/plain; charset=utf-8")
+
+
+@app.post("/api/atlas")
+def post_atlas():
+    global _ATLAS
+    body = request.get_json(silent=True) if request.is_json else None
+    if not isinstance(body, dict):
+        return Response("need JSON atlas object", status=400)
+    with _params_lock:
+        _ATLAS = apply_atlas_post(_ATLAS, body)
+        out = dict(_ATLAS)
+    return Response(
+        dumps_llm_pack({"ok": True, "atlas": normalize_atlas(out)}).encode("utf-8"),
+        content_type="application/json; charset=utf-8",
+    )
+
+
+@app.get("/atlas")
+def atlas_page():
+    """Multi-page + manual scenario inventory for the agent."""
+    return Response(ATLAS_PAGE_HTML.encode("utf-8"), content_type="text/html; charset=utf-8")
 
 
 @app.get("/api/verify")

@@ -834,27 +834,94 @@
     };
   }
 
+  function isMegaRegionName(name) {
+    var t = normLabel(name);
+    if (!t || t.length > 48) return true;
+    if (/\d/.test(t) && /%|руб/i.test(t)) return true;
+    var hits = 0;
+    ["брест", "гомел", "гродн", "могил", "минск", "витеб"].forEach(function (k) {
+      if (t.toLowerCase().indexOf(k) >= 0) hits++;
+    });
+    return hits >= 2;
+  }
+
+  /** Split «42 837,80 руб. 84,7 %» stuck in percent; drop concat mega-names. */
+  function normalizeRegionFields(r) {
+    if (!r || !r.name) return null;
+    if (isMegaRegionName(r.name)) return null;
+    var name = mapKeyToRu(r.name);
+    if (!name || isMegaRegionName(name)) return null;
+    var amount = r.amount || null;
+    var percent = r.percent || null;
+    var value = r.value || null;
+    var blob = [amount, percent, value]
+      .filter(function (x) {
+        return x;
+      })
+      .join(" ");
+    if ((percent && /руб/i.test(String(percent))) || (amount && /%/.test(String(amount)))) {
+      amount = takeMoney(blob) || amount;
+      percent = takePercent(blob) || percent;
+    }
+    if (percent && /руб/i.test(String(percent))) percent = takePercent(String(percent));
+    if (amount && /%/.test(String(amount)) && !/руб/i.test(String(amount))) {
+      percent = percent || takePercent(String(amount));
+      amount = takeMoney(String(amount));
+    }
+    if (percent && !/^\d{1,3}([.,]\d+)?\s*%$/.test(normLabel(percent))) {
+      percent = takePercent(String(percent));
+    }
+    if (amount && !/руб|\d/i.test(String(amount))) amount = null;
+    value = amount || percent || null;
+    return { name: name, amount: amount, percent: percent, value: value };
+  }
+
   /**
    * Paths without private elementvalue must not inherit Brest 31% from SVG group text.
-   * Labels fill holes for regions that still have no amount/percent.
+   * labelsMustBePainted: leaf labels may ADD inset regions (Минск) but must not
+   * invent numbers for empty oblast paths that have no elementvalue on screen.
    */
-  function sanitizeMapRegions(fromAttrs, fromLabels) {
-    var primary = (fromAttrs || []).map(function (r) {
-      if (!r) return null;
-      var out = {
-        name: r.name,
-        amount: r.fromValueAttr ? r.amount : null,
-        percent: r.fromValueAttr ? r.percent : null,
-        value: r.fromValueAttr ? r.value : null,
-      };
-      if (!r.fromValueAttr) {
-        out.amount = null;
-        out.percent = null;
-        out.value = null;
-      }
-      return out;
-    }).filter(Boolean);
-    return mergeRegionLists(primary, fromLabels || [], { allowNew: true });
+  function sanitizeMapRegions(fromAttrs, fromLabels, opts) {
+    opts = opts || {};
+    var primary = (fromAttrs || [])
+      .map(function (r) {
+        if (!r) return null;
+        if (!r.fromValueAttr) {
+          return normalizeRegionFields({
+            name: r.name,
+            amount: null,
+            percent: null,
+            value: null,
+          });
+        }
+        return normalizeRegionFields({
+          name: r.name,
+          amount: r.amount,
+          percent: r.percent,
+          value: r.value,
+        });
+      })
+      .filter(Boolean);
+
+    var labels = (fromLabels || [])
+      .map(function (r) {
+        return normalizeRegionFields(r);
+      })
+      .filter(Boolean);
+
+    if (opts.labelsMustBePainted) {
+      var primaryNames = {};
+      primary.forEach(function (r) {
+        primaryNames[r.name] = true;
+      });
+      // Keep SVG path membership; do not fill empty paths from cache/DOM.
+      var base = mergeRegionLists(primary, [], { allowNew: false });
+      var extras = labels.filter(function (r) {
+        return r && !primaryNames[r.name];
+      });
+      return mergeRegionLists(base, extras, { allowNew: true });
+    }
+    return mergeRegionLists(primary, labels, { allowNew: true });
   }
 
   function pickPivotSource(list) {
@@ -870,6 +937,8 @@
     (list || []).forEach(function (p) {
       if (!p || !p.row_count) return;
       var sc = pivotDataScore(p);
+      // Total/Итог with 0,0 only — not real drill data (Pinsk case).
+      if (sc < 10) return;
       var rk = rank[p.capture] || 0;
       if (!best || sc > bestScore || (sc === bestScore && rk > bestRank)) {
         best = p;
@@ -959,6 +1028,7 @@
     pivotDataScore: pivotDataScore,
     pruneSparsePivotRows: pruneSparsePivotRows,
     sanitizeMapRegions: sanitizeMapRegions,
+    normalizeRegionFields: normalizeRegionFields,
     pickPivotSource: pickPivotSource,
     mergeRegionLists: mergeRegionLists,
     pairRegionLabels: pairRegionLabels,

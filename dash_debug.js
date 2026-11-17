@@ -397,6 +397,7 @@
       '<span style="margin-left:auto"></span>' +
       '<button type="button" id="dash-interaction-compare" style="background:#166534;color:#ecfdf5;border:1px solid #22c55e;padding:3px 10px;cursor:pointer;font-weight:700">SVERKA</button>' +
       '<button type="button" id="dash-interaction-structure" style="background:#1e3a8a;color:#dbeafe;border:1px solid #3b82f6;padding:3px 10px;cursor:pointer;font-weight:700">STRUKTURA</button>' +
+      '<button type="button" id="dash-interaction-atlas" style="background:#854d0e;color:#fef9c3;border:1px solid #eab308;padding:3px 10px;cursor:pointer;font-weight:700">ATLAS</button>' +
       '<button type="button" id="dash-interaction-json" style="background:#1f2937;color:#e2e8f0;border:1px solid #475569;padding:2px 8px;cursor:pointer">JSON</button>' +
       '<button type="button" id="dash-interaction-clear" style="background:#1f2937;color:#e2e8f0;border:1px solid #475569;padding:2px 8px;cursor:pointer">clear</button>' +
       '<button type="button" id="dash-interaction-hide" style="background:#1f2937;color:#e2e8f0;border:1px solid #475569;padding:2px 8px;cursor:pointer">hide</button>';
@@ -429,10 +430,167 @@
     document.getElementById("dash-interaction-structure").onclick = function () {
       postViewportAndStructure();
     };
+    document.getElementById("dash-interaction-atlas").onclick = function () {
+      runAtlasAuto();
+    };
     document.getElementById("dash-interaction-json").onclick = function () {
       refreshLlmPack(0);
     };
     return el;
+  }
+
+  function findViewerJsObject() {
+    try {
+      var nodes = document.getElementsByTagName("*");
+      for (var i = 0; i < nodes.length; i++) {
+        if (nodes[i].jsObject && nodes[i].jsObject.reportParams) return nodes[i].jsObject;
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function listReportPages() {
+    var report = resolveStiReport();
+    var out = [];
+    if (!report || !report.pages) return out;
+    var n = collectionLength(report.pages);
+    if (n < 1 && report.pages.list && report.pages.list.length)
+      n = report.pages.list.length;
+    for (var i = 0; i < n; i++) {
+      var p = collectionItem(report.pages, i);
+      if (!p && report.pages.list) p = report.pages.list[i];
+      var name =
+        (p &&
+          (p.name ||
+            p.aliasName ||
+            p.pageName ||
+            (p.properties && p.properties.name))) ||
+        "Page" + (i + 1);
+      out.push({ index: i, name: String(name) });
+    }
+    if (!out.length) out.push({ index: 0, name: "Page1" });
+    return out;
+  }
+
+  function gotoReportPage(index) {
+    return new Promise(function (resolve) {
+      try {
+        var jo = findViewerJsObject();
+        if (jo && jo.reportParams) {
+          jo.reportParams.pageNumber = index;
+          if (typeof jo.postAction === "function") {
+            try {
+              jo.postAction("GetPages");
+            } catch (e0) {
+              try {
+                jo.postAction("RefreshViewer");
+              } catch (e1) {}
+            }
+          }
+        }
+        var report = resolveStiReport();
+        if (report && report.pages && typeof report.pages.getByIndex === "function") {
+          try {
+            var page = report.pages.getByIndex(index);
+            if (page) report.currentPage = page;
+          } catch (e2) {}
+        }
+      } catch (e3) {}
+      setTimeout(resolve, 1800);
+    });
+  }
+
+  function buildAtlasPageRecord(label, kind, pageMeta, vp) {
+    return {
+      label: label,
+      kind: kind || "manual",
+      page_index: pageMeta && pageMeta.index,
+      page_name: pageMeta && pageMeta.name,
+      captured_at: (vp && vp.captured_at) || new Date().toISOString(),
+      filters: (vp && vp.filters) || { panel: {}, dashboard: [] },
+      interaction: (vp && vp.interaction) || lastInteractionDump,
+      viewport: vp,
+    };
+  }
+
+  function captureAtlasPage(label, kind, pageMeta) {
+    var vp = snapshotViewport(lastInteractionDump);
+    return enrichViewportTables(vp).then(function (enriched) {
+      return buildAtlasPageRecord(label, kind, pageMeta, enriched);
+    });
+  }
+
+  function runAtlasAuto() {
+    showText("ATLAS: obhod pages...", "ATLAS");
+    var pages = listReportPages();
+    var chain = Promise.resolve();
+    var collected = [];
+    pages.forEach(function (meta) {
+      chain = chain.then(function () {
+        return gotoReportPage(meta.index).then(function () {
+          return captureAtlasPage(
+            "page" + meta.index + " " + meta.name,
+            "auto_page",
+            meta
+          ).then(function (rec) {
+            collected.push(rec);
+          });
+        });
+      });
+    });
+    return chain
+      .then(function () {
+        return fetch("/api/atlas", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            replace: true,
+            captured_at: new Date().toISOString(),
+            pages: collected,
+          }),
+          cache: "no-store",
+        });
+      })
+      .then(function () {
+        return fetch("/api/atlas-text", { cache: "no-store" });
+      })
+      .then(function (r) {
+        return r.text();
+      })
+      .then(function (text) {
+        showText(text, "ATLAS");
+        try {
+          window.open("/atlas", "_blank");
+        } catch (e) {}
+      })
+      .catch(function (e) {
+        showText(String(e), "ATLAS ERROR");
+      });
+  }
+
+  function dashAtlasAddSnapshot(label) {
+    var pages = listReportPages();
+    var jo = findViewerJsObject();
+    var idx =
+      jo && jo.reportParams && typeof jo.reportParams.pageNumber === "number"
+        ? jo.reportParams.pageNumber
+        : 0;
+    var meta = pages[idx] || pages[0] || { index: idx, name: "Page" };
+    return captureAtlasPage(label || "manual", "manual", meta).then(function (rec) {
+      return fetch("/api/atlas", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ page: rec }),
+        cache: "no-store",
+      }).then(function () {
+        return fetch("/api/atlas-text", { cache: "no-store" });
+      }).then(function (r) {
+        return r.text();
+      }).then(function (text) {
+        showText(text, "ATLAS +" + (label || "manual"));
+        return text;
+      });
+    });
   }
 
   function postViewportAndStructure() {
@@ -1354,22 +1512,26 @@
       }
       var isPivot = elType === "StiPivotTableElement";
       if (isPivot) {
-        var htmlParsed = capturePivotHtml(findDomByName(name));
         loadPivotViewerData(component).then(function (viewer) {
           var api = window.dashExportJson;
           var viewerScore =
             api && api.pivotDataScore ? api.pivotDataScore(viewer && viewer.parsed) : 0;
           function finish(more) {
-            var list = [viewer && viewer.parsed].concat(more || []);
-            if (viewerScore < 20 && htmlParsed) list.push(htmlParsed);
+            // Re-read painted DOM here — early capture is often empty right after drill.
+            var htmlNow = capturePivotHtml(findDomByName(name));
+            var list = [].concat(more || []);
+            if (viewerScore >= 10) list.push(viewer && viewer.parsed);
+            if (htmlNow) list.push(htmlNow);
             var best =
               api && api.pickPivotSource
                 ? api.pickPivotSource(list)
-                : viewer && viewer.parsed;
+                : htmlNow || (viewerScore >= 10 ? viewer && viewer.parsed : null);
             if (!best || !best.row_count) {
               resolve({
                 parsed: null,
-                reason: (viewer && viewer.reason) || "pivot_empty",
+                reason:
+                  (viewer && viewer.reason) ||
+                  "pivot_empty html=" + (htmlNow ? htmlNow.row_count : 0),
               });
               return;
             }
@@ -1482,15 +1644,10 @@
   }
 
   function mergeMapRegions(painted, cached) {
-    var api = window.dashExportJson;
-    if (api && typeof api.mergeRegionLists === "function") {
-      // Painted SVG is truth for WHICH regions exist after drill.
-      // Cache may still hold all oblasts — never invent them on a drilled map.
-      return api.mergeRegionLists(painted || [], cached || [], {
-        allowNew: !(painted && painted.length),
-      });
-    }
-    return painted && painted.length ? painted : cached || [];
+    // data_cache has ALL oblast numbers even when the map paints only Brest.
+    // Never merge cache amounts — painted SVG/labels are the only truth.
+    void cached;
+    return painted || [];
   }
 
   function enrichViewportTables(vp) {
@@ -1651,16 +1808,11 @@
             }
           }
         }
-        if (
-          tag !== "text" &&
-          tag !== "tspan" &&
-          tag !== "title" &&
-          tag !== "div" &&
-          tag !== "span" &&
-          tag !== "path"
-        ) {
+        // Only leaf text nodes — div/span textContent concatenates the whole map
+        // into one mega-line (Брестская…Гомельская…) and invents fake regions.
+        if (tag !== "text" && tag !== "tspan" && tag !== "title") continue;
+        if (node.getElementsByTagName && node.getElementsByTagName("tspan").length)
           continue;
-        }
         pushLine(node.textContent);
         if (node.getAttribute && node.getAttribute("text"))
           pushLine(node.getAttribute("text"));
@@ -1669,7 +1821,9 @@
     walkRoot(domEl);
     var labeled = api.pairRegionLabels(lines);
     if (typeof api.sanitizeMapRegions === "function") {
-      return api.sanitizeMapRegions(fromAttrs, labeled);
+      return api.sanitizeMapRegions(fromAttrs, labeled, {
+        labelsMustBePainted: true,
+      });
     }
     if (typeof api.mergeRegionLists === "function") {
       return api.mergeRegionLists(fromAttrs, labeled, {
@@ -1980,6 +2134,8 @@
   window.dashEnrichViewportTables = enrichViewportTables;
   window.dashExportTableElementAsync = exportTableElementAsync;
   window.dashShowStructure = postViewportAndStructure;
+  window.dashRunAtlasAuto = runAtlasAuto;
+  window.dashAtlasAddSnapshot = dashAtlasAddSnapshot;
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", function () {

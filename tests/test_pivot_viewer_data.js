@@ -350,6 +350,83 @@ var pruned = mod.pruneSparsePivotRows(withJunk);
 ok(pruned.row_count === 2, "pruned junk " + pruned.row_count);
 ok(pruned.rows[1]["Наименование платежа"] === "Итог", "kept total");
 ok(polluted.length >= 1, "polluted fixture used");
+
+// Screen paints only Brest+Minsk; cache/DOM must not invent Gomel numbers.
+var screenOnly = mod.sanitizeMapRegions(
+  [
+    {
+      name: "Брестская",
+      amount: "7 099,31 руб.",
+      percent: "31,0 %",
+      value: "7 099,31 руб.",
+      fromValueAttr: true,
+    },
+    { name: "Гомельская", amount: null, percent: null, value: null, fromValueAttr: false },
+    { name: "Гродненская", amount: null, percent: null, value: null, fromValueAttr: false },
+  ],
+  [
+    { name: "Гомельская", amount: "67 234,08 руб.", percent: "81,8 %", value: "67 234,08 руб." },
+    { name: "Минск", amount: "23 414,38 руб.", percent: "33,3%", value: "23 414,38 руб." },
+  ],
+  { labelsMustBePainted: true }
+);
+ok(regionNamed(screenOnly, "Брестская").percent.indexOf("31") >= 0, "screen brest");
+ok(!regionNamed(screenOnly, "Гомельская").amount, "no invented gomel amount");
+ok(!regionNamed(screenOnly, "Гомельская").percent, "no invented gomel percent");
+ok(regionNamed(screenOnly, "Минск").percent === "33,3%", "minsk label ok");
+
+var dirty = mod.normalizeRegionFields({
+  name: "Витебская",
+  amount: null,
+  percent: "42 837,80 руб. 84,7 %",
+  value: "42 837,80 руб. 84,7 %",
+});
+ok(dirty.amount && dirty.amount.indexOf("42 837") >= 0, "split amount " + dirty.amount);
+ok(dirty.percent && dirty.percent.indexOf("84") >= 0 && dirty.percent.indexOf("руб") < 0, "split percent " + dirty.percent);
+
+var mega = mod.normalizeRegionFields({
+  name: "Брестская Брестская7 099,31 31,0 %ГомельскаяГомельская",
+  amount: "7 099,31 руб.",
+  percent: "31,0 %",
+  value: "7 099,31 руб.",
+});
+ok(mega == null, "drop mega concat name");
+
+// Pinsk: pivot_viewer only Total/Итог 0,0 must lose to painted html_grid.
+var pinskStub = mod.parsePivotViewerData({
+  headerHeight: 2,
+  headerWidth: 2,
+  cells: [
+    [{ text: "Сводная таблица" }, { text: "Наименование платежа" }, { text: "" }, { text: "Итог" }],
+    [{ text: "Сводная таблица" }, { text: "Управление/отдел" }, { text: "Total" }, { text: "Итог" }],
+    [{ text: "Вид бюджета" }, { text: "Факт (руб.)" }, { text: "0,0" }, { text: "0,0" }],
+    [{ text: "Вид бюджета" }, { text: "План (руб.)" }, { text: "0,0" }, { text: "0,0" }],
+    [{ text: "Вид бюджета" }, { text: "Отклонение (руб.)" }, { text: "0,0" }, { text: "0,0" }],
+  ],
+});
+var pinskHtml = mod.joinPivotHtmlChunks([
+  [
+    ["Наименование платежа"],
+    ["Земельный налог, всего"],
+    ["Экологический налог, всего"],
+    ["Итог"],
+  ],
+  [
+    ["Факт (руб.)", "План (руб.)"],
+    ["1 027,2", "2 881,7"],
+    ["1 493,2", "1 428,0"],
+    ["7 220,9", "9 797,2"],
+  ],
+]);
+ok(pinskHtml && pinskHtml.rows[0][pinskHtml.columns[0]].indexOf("Земельный") >= 0, "pinsk name");
+ok(mod.pivotDataScore(pinskStub) < 10, "stub weak " + mod.pivotDataScore(pinskStub));
+var pinskPick = mod.pickPivotSource([pinskStub, pinskHtml]);
+ok(pinskPick && pinskPick.capture === "html_grid", "pinsk picks html not stub");
+ok(
+  String(JSON.stringify(pinskPick.rows)).indexOf("7 220,9") >= 0,
+  "pinsk keeps 7220,9"
+);
+ok(mod.pickPivotSource([pinskStub]) == null, "stub alone rejected");
 ok(mod.mapKeyToRu("GomelskayaVoblasts") === "Гомельская", "gomel");
 
 ok(mod.isChromeLabel("Close") === true, "Close is chrome");
