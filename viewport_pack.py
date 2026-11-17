@@ -106,11 +106,16 @@ def normalize_viewport(raw: Any) -> dict[str, Any]:
     if interaction is not None and not isinstance(interaction, dict):
         interaction = {"raw": interaction}
 
+    export_debug = raw.get("export_debug")
+    if not isinstance(export_debug, list):
+        export_debug = []
+
     return {
         "captured_at": raw.get("captured_at"),
         "filters": {"panel": dict(panel), "dashboard": dash_rules},
         "interaction": interaction,
         "elements": elements,
+        "export_debug": export_debug,
     }
 
 
@@ -134,13 +139,14 @@ def build_viewport_pack(viewport: dict[str, Any] | None) -> dict[str, Any]:
             }
 
     pack: dict[str, Any] = {
-        "results_source": "viewport",
+        "results_source": "viewport",  # tables: data_cache / export_json / grid / html
         "captured_at": vp.get("captured_at"),
         "filters": dict(vp["filters"].get("panel") or {}),
         "dashboard_filters": list(vp["filters"].get("dashboard") or []),
         "interaction": vp.get("interaction"),
         "elements": list(vp["elements"]),
         "results": results,
+        "export_debug": list(vp.get("export_debug") or []),
     }
     return json_safe(pack)
 
@@ -150,9 +156,25 @@ def build_viewport_compare_text(pack: dict[str, Any] | None, *, max_rows: int = 
     pack = dict(pack or {})
     lines: list[str] = []
     lines.append("========== SVERKA S FRONTOM ==========")
-    lines.append("Istochnik=VIEWPORT (to chto narisovano na dashborde).")
+    lines.append("Istochnik=VIEWPORT (knopki/KPI/karta) + table data_cache/export.")
     lines.append("NE SQL-snyamka. NE verify-zhurnal.")
+    lines.append("Horosho: capture=pivot_viewer / data_cache / export_json + cifry.")
+    lines.append("Ploho: html_sti + kolonka Close — eto knopka UI, ne dannye.")
     lines.append("")
+
+    dbg = list(pack.get("export_debug") or [])
+    if dbg:
+        lines.append("0) TABLE DATA PIPELINE:")
+        for item in dbg:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"   {item.get('name')}: ok={item.get('ok')} "
+                f"capture={item.get('capture')!r} rows={item.get('rows')} "
+                f"prev={item.get('prev_capture')!r}"
+            )
+            lines.append(f"      reason={item.get('reason')}")
+        lines.append("")
 
     if pack.get("results_source") != "viewport" or not pack.get("elements"):
         lines.append("VIEWPORT PUSTO.")

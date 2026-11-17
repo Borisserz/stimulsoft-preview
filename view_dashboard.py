@@ -57,6 +57,11 @@ from llm_pack import (
     snapshot_from_data_args,
     update_filter_state,
 )
+from structure_pack import (
+    STRUCTURE_PAGE_HTML,
+    build_structure_text,
+    structure_from_viewport,
+)
 from viewport_pack import (
     build_viewport_compare_text,
     build_viewport_pack,
@@ -175,8 +180,13 @@ _STI_QUERY_SKIP = {"sti_event", "sti_data", "sti_handler"}
 
 
 def _load_debug_js() -> str:
-    # read each time; utf-8-sig strips BOM if Windows editors added it
-    return (ROOT / "dash_debug.js").read_text(encoding="utf-8-sig")
+    # read each time; utf-8-sig strips BOM if Windows editors added it.
+    # export_json_parse.js first — pure Table→JSON helpers for hybrid capture.
+    parts = [
+        (ROOT / "export_json_parse.js").read_text(encoding="utf-8-sig"),
+        (ROOT / "dash_debug.js").read_text(encoding="utf-8-sig"),
+    ]
+    return "\n".join(parts)
 
 
 def _public_query_params() -> dict[str, str]:
@@ -600,6 +610,29 @@ def get_compare():
     """SVERKA: viewport only (what is drawn on the dashboard)."""
     text = build_viewport_compare_text(llm_pack_snapshot(), max_rows=15)
     return Response(text.encode("utf-8"), content_type="text/plain; charset=utf-8")
+
+
+@app.get("/api/structure")
+def get_structure_json():
+    """Inventory of element names/types (no table row dump)."""
+    with _params_lock:
+        vp = dict(_VIEWPORT) if isinstance(_VIEWPORT, dict) else {}
+    body = dumps_llm_pack(structure_from_viewport(vp))
+    return Response(body.encode("utf-8"), content_type="application/json; charset=utf-8")
+
+
+@app.get("/api/structure-text")
+def get_structure_text():
+    with _params_lock:
+        vp = dict(_VIEWPORT) if isinstance(_VIEWPORT, dict) else {}
+    text = build_structure_text(structure_from_viewport(vp))
+    return Response(text.encode("utf-8"), content_type="text/plain; charset=utf-8")
+
+
+@app.get("/structure")
+def structure_page():
+    """Photographable page: all block/button names for the agent."""
+    return Response(STRUCTURE_PAGE_HTML.encode("utf-8"), content_type="text/html; charset=utf-8")
 
 
 @app.get("/api/verify")

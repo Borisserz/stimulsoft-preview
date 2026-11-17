@@ -396,6 +396,7 @@
       '<span id="dash-interaction-meta" style="color:#94a3b8"></span>' +
       '<span style="margin-left:auto"></span>' +
       '<button type="button" id="dash-interaction-compare" style="background:#166534;color:#ecfdf5;border:1px solid #22c55e;padding:3px 10px;cursor:pointer;font-weight:700">SVERKA</button>' +
+      '<button type="button" id="dash-interaction-structure" style="background:#1e3a8a;color:#dbeafe;border:1px solid #3b82f6;padding:3px 10px;cursor:pointer;font-weight:700">STRUKTURA</button>' +
       '<button type="button" id="dash-interaction-json" style="background:#1f2937;color:#e2e8f0;border:1px solid #475569;padding:2px 8px;cursor:pointer">JSON</button>' +
       '<button type="button" id="dash-interaction-clear" style="background:#1f2937;color:#e2e8f0;border:1px solid #475569;padding:2px 8px;cursor:pointer">clear</button>' +
       '<button type="button" id="dash-interaction-hide" style="background:#1f2937;color:#e2e8f0;border:1px solid #475569;padding:2px 8px;cursor:pointer">hide</button>';
@@ -425,10 +426,41 @@
     document.getElementById("dash-interaction-compare").onclick = function () {
       postViewportAndCompare();
     };
+    document.getElementById("dash-interaction-structure").onclick = function () {
+      postViewportAndStructure();
+    };
     document.getElementById("dash-interaction-json").onclick = function () {
       refreshLlmPack(0);
     };
     return el;
+  }
+
+  function postViewportAndStructure() {
+    var vp = snapshotViewport(lastInteractionDump);
+    enrichViewportTables(vp)
+      .then(function (enriched) {
+        return fetch("/api/viewport", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(enriched),
+          cache: "no-store",
+        });
+      })
+      .then(function () {
+        return fetch("/api/structure-text", { cache: "no-store" });
+      })
+      .then(function (r) {
+        return r.text();
+      })
+      .then(function (text) {
+        showText(text, "STRUKTURA");
+        try {
+          window.open("/structure", "_blank");
+        } catch (e) {}
+      })
+      .catch(function (e) {
+        showText(String(e), "ERROR");
+      });
   }
 
   function showText(text, label) {
@@ -728,8 +760,20 @@
     return s.length > 0 && /^[\d.,\-%]+$/.test(s);
   }
 
+  function isChromeHeaderName(name) {
+    if (window.dashExportJson && window.dashExportJson.isChromeLabel) {
+      return window.dashExportJson.isChromeLabel(name);
+    }
+    var s = String(name || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+    return s === "close" || s === "закрыть" || s === "save" || s === "сохранить";
+  }
+
   function stiScrapeHtmlFallback(root) {
     // Last resort only. Stimulsoft: header table (1 row) + body table (data only).
+    // Never treat element chrome (Close/Save) as column headers.
     if (!root || !root.getElementsByTagName) return null;
     var tables = root.getElementsByTagName("table");
     var headerNames = null;
@@ -746,11 +790,15 @@
       if (trs.length === 1) {
         var names = [];
         var digitish = 0;
+        var chromeHits = 0;
         for (var c = 0; c < row0.cells.length; c++) {
           var nm = htmlCellText(row0.cells[c]) || "c" + c;
           names.push(nm);
           if (looksLikeDigitHeader(nm)) digitish++;
+          if (isChromeHeaderName(nm)) chromeHits++;
         }
+        // Skip toolbar/title chrome mistaken for a header row
+        if (chromeHits > 0) continue;
         if (digitish * 2 < names.length) headerNames = names;
         continue;
       }
@@ -838,11 +886,12 @@
     return null;
   }
 
-  function captureTableElement(domEl, ca) {
+  function captureTableElementGrid(domEl, ca) {
     var attrs = domEl.elementAttributes || {};
     var dg = domEl.dataGrid || null;
     ca = ca || attrs.contentAttributes || {};
 
+    // Fallback when Stimulsoft exportAsync(Json) is unavailable.
     // Try ALL pairings: amounts often only in contentAttributes.hiddenData
     // while names live on dataGrid.data (or the reverse).
     var visibles = [dg && dg.data, ca.data];
@@ -894,6 +943,429 @@
       capture: best ? "grid_empty" : "empty",
       title: stiResolveTitle(domEl, attrs),
     };
+  }
+
+  function capturePivotFromViewerData(viewerData, title) {
+    var api = window.dashExportJson;
+    if (!api || typeof api.parsePivotViewerData !== "function") return null;
+    var parsed = api.parsePivotViewerData(viewerData);
+    if (!parsed || !parsed.row_count) return null;
+    parsed.title = title || parsed.title;
+    return parsed;
+  }
+
+  /** Sync: contentAttributes.cells from Stimulsoft pivot paint, if present. */
+  function capturePivotElementSync(domEl, ca) {
+    var attrs = (domEl && domEl.elementAttributes) || {};
+    ca = ca || attrs.contentAttributes || {};
+    var title = stiResolveTitle(domEl, attrs);
+    if (ca.cells && Array.isArray(ca.cells)) {
+      var fromCa = capturePivotFromViewerData(
+        {
+          cells: ca.cells,
+          headerHeight: ca.headerHeight,
+          headerWidth: ca.headerWidth,
+        },
+        title
+      );
+      if (fromCa) return fromCa;
+    }
+    return null;
+  }
+
+  // sync path used inside snapshotElement; enrich fills pivot/table async later
+  function captureTableElement(domEl, ca) {
+    var attrs = (domEl && domEl.elementAttributes) || {};
+    var type = attrs.type || "";
+    if (type === "StiPivotTableElement") {
+      var pivotSync = capturePivotElementSync(domEl, ca);
+      if (pivotSync && pivotSync.row_count) return pivotSync;
+      // Do NOT fall through to html_sti for pivots — Close button pollutes columns.
+      // Async getViewerData will fill; return empty placeholder.
+      return {
+        columns: [],
+        rows: [],
+        row_count: 0,
+        capture: "pivot_pending",
+        title: stiResolveTitle(domEl, attrs),
+      };
+    }
+    return captureTableElementGrid(domEl, ca);
+  }
+
+  function loadPivotViewerData(component) {
+    return new Promise(function (resolve) {
+      try {
+        var Helper =
+          Stimulsoft &&
+          Stimulsoft.Dashboard &&
+          Stimulsoft.Dashboard.Helpers &&
+          Stimulsoft.Dashboard.Helpers.StiPivotTableHelper;
+        if (!Helper || typeof Helper.getViewerData !== "function") {
+          resolve({ parsed: null, reason: "no_StiPivotTableHelper" });
+          return;
+        }
+        Promise.resolve(Helper.getViewerData(component))
+          .then(function (vd) {
+            var parsed = capturePivotFromViewerData(vd, null);
+            if (parsed && parsed.row_count)
+              resolve({ parsed: parsed, reason: "ok_pivot_viewer" });
+            else
+              resolve({
+                parsed: null,
+                reason:
+                  "pivot_viewer_empty cells=" +
+                  (vd && vd.cells ? vd.cells.length : 0),
+              });
+          })
+          .catch(function (e) {
+            resolve({ parsed: null, reason: "pivot_viewer_err:" + String(e) });
+          });
+      } catch (e2) {
+        resolve({ parsed: null, reason: "pivot_viewer_throw:" + String(e2) });
+      }
+    });
+  }
+
+  function rememberStiReport(report) {
+    if (report && typeof report === "object" && report !== "[StiReport]") {
+      try {
+        window.__stiReport = report;
+      } catch (e) {}
+    }
+  }
+
+  function resolveStiReport() {
+    if (window.__stiReport) return window.__stiReport;
+    try {
+      if (
+        typeof Stimulsoft !== "undefined" &&
+        Stimulsoft.Viewer &&
+        Stimulsoft.Viewer.StiViewer
+      ) {
+        // last resort: any viewer that already has a report
+        var nodes = document.getElementsByTagName("*");
+        for (var i = 0; i < nodes.length; i++) {
+          var el = nodes[i];
+          if (el.jsObject && el.jsObject.report) {
+            rememberStiReport(el.jsObject.report);
+            return el.jsObject.report;
+          }
+          if (el.report && typeof el.report.getComponentByName === "function") {
+            rememberStiReport(el.report);
+            return el.report;
+          }
+        }
+      }
+    } catch (e2) {}
+    return window.__stiReport || null;
+  }
+
+  function stiListToArray(list) {
+    if (!list) return [];
+    if (Array.isArray(list)) return list;
+    if (Array.isArray(list.list)) return list.list;
+    var n = collectionLength(list);
+    var out = [];
+    if (n > 0) {
+      for (var i = 0; i < n; i++) out.push(collectionItem(list, i));
+      return out;
+    }
+    if (typeof list.length === "number" && list.length > 0) {
+      for (var j = 0; j < list.length; j++) out.push(list[j]);
+    }
+    return out;
+  }
+
+  function resolveTableComponent(name) {
+    // 1) painted DOM often keeps live .element
+    try {
+      var nodes = document.getElementsByTagName("*");
+      for (var i = 0; i < nodes.length; i++) {
+        var domEl = nodes[i];
+        var attrs = domEl.elementAttributes;
+        if (!attrs || String(attrs.name) !== String(name)) continue;
+        if (domEl.element && typeof domEl.element === "object") {
+          if (domEl.element.report) rememberStiReport(domEl.element.report);
+          return domEl.element;
+        }
+      }
+    } catch (e0) {}
+    var report = resolveStiReport();
+    if (!report || typeof report.getComponentByName !== "function") return null;
+    try {
+      return report.getComponentByName(name);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function meterLabel(meter, index) {
+    if (!meter || typeof meter !== "object") return "c" + index;
+    return (
+      stiNormStr(
+        meter.labelCorrect ||
+          meter.label ||
+          meter.displayName ||
+          meter.name ||
+          meter.key ||
+          meter.expression ||
+          meter.path
+      ) || "c" + index
+    );
+  }
+
+  function unwrapCell(v) {
+    if (v == null) return null;
+    if (typeof v !== "object") return v;
+    if (v.value !== undefined && v.value !== null && v.value !== "") return v.value;
+    if (v.text !== undefined && v.text !== null && v.text !== "") return v.text;
+    if (v.Value !== undefined) return v.Value;
+    return v;
+  }
+
+  /** Stimulsoft.Report.Dashboard.StiElementDataCache — same filtered rows as the table widget. */
+  function parseStiDataTable(dt) {
+    if (!dt) return null;
+    var meters = stiListToArray(dt.meters);
+    var rowsRaw = stiListToArray(dt.rows);
+    if (!meters.length || !rowsRaw.length) return null;
+    var rawNames = [];
+    for (var m = 0; m < meters.length; m++) rawNames.push(meterLabel(meters[m], m));
+    var columns = stiUniqueNames(rawNames);
+    var rows = [];
+    for (var r = 0; r < rowsRaw.length; r++) {
+      var row = rowsRaw[r];
+      var cells = stiListToArray(row);
+      if (!cells.length && row && typeof row.length === "number") {
+        cells = [];
+        for (var k = 0; k < row.length; k++) cells.push(row[k]);
+      }
+      var obj = {};
+      var any = false;
+      for (var c = 0; c < columns.length; c++) {
+        var val = stiNormStr(unwrapCell(cells[c]));
+        obj[columns[c]] = val;
+        if (val !== null && val !== undefined && val !== "") any = true;
+      }
+      if (any) rows.push(obj);
+    }
+    if (!rows.length) return null;
+    return {
+      columns: columns,
+      rows: rows,
+      row_count: rows.length,
+      capture: "data_cache",
+    };
+  }
+
+  function loadTableFromDataCache(component) {
+    return new Promise(function (resolve) {
+      try {
+        var cache =
+          Stimulsoft &&
+          Stimulsoft.Report &&
+          Stimulsoft.Report.Dashboard &&
+          Stimulsoft.Report.Dashboard.StiElementDataCache;
+        if (!cache || typeof cache.tryToGetOrCreate !== "function") {
+          resolve({ parsed: null, reason: "no_StiElementDataCache" });
+          return;
+        }
+        Promise.resolve(cache.tryToGetOrCreate(component))
+          .then(function (dt) {
+            var parsed = parseStiDataTable(dt);
+            if (parsed) resolve({ parsed: parsed, reason: "ok_data_cache" });
+            else
+              resolve({
+                parsed: null,
+                reason:
+                  "data_cache_empty meters=" +
+                  stiListToArray(dt && dt.meters).length +
+                  " rows=" +
+                  stiListToArray(dt && dt.rows).length,
+              });
+          })
+          .catch(function (e) {
+            resolve({ parsed: null, reason: "data_cache_err:" + String(e) });
+          });
+      } catch (e2) {
+        resolve({ parsed: null, reason: "data_cache_throw:" + String(e2) });
+      }
+    });
+  }
+
+  function stiExportFormatJson() {
+    try {
+      return Stimulsoft.Report.StiExportFormat.Json;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function stiExportTools() {
+    try {
+      return Stimulsoft.Dashboard.Export.StiDashboardExportTools;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * Official Table→JSON export (2024.2.x).
+   * https://www.stimulsoft.com/en/samples/dashboards-js/javascript/exporting-a-dashboard-from-code
+   */
+  function exportTableJsonAsync(component) {
+    return new Promise(function (resolve) {
+      var tools = stiExportTools();
+      var fmt = stiExportFormatJson();
+      var parseApi = window.dashExportJson;
+      if (!tools || typeof tools.exportAsync !== "function" || fmt == null) {
+        resolve({ parsed: null, reason: "no_exportAsync_or_Json" });
+        return;
+      }
+      if (!parseApi || typeof parseApi.parseExportJson !== "function") {
+        resolve({ parsed: null, reason: "no_parseExportJson" });
+        return;
+      }
+      var settled = false;
+      var timer = setTimeout(function () {
+        if (settled) return;
+        settled = true;
+        resolve({ parsed: null, reason: "export_json_timeout" });
+      }, 12000);
+      try {
+        tools.exportAsync(
+          function (data) {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            try {
+              var textPreview = "";
+              try {
+                textPreview = String(
+                  (window.dashExportJson &&
+                    window.dashExportJson.decodeExportData(data)) ||
+                    ""
+                ).slice(0, 120);
+              } catch (e0) {}
+              var parsed = parseApi.parseExportJson(data);
+              if (parsed)
+                resolve({ parsed: parsed, reason: "ok_export_json" });
+              else
+                resolve({
+                  parsed: null,
+                  reason: "export_json_unparsed preview=" + textPreview,
+                });
+            } catch (e) {
+              resolve({ parsed: null, reason: "export_json_err:" + String(e) });
+            }
+          },
+          component,
+          fmt
+        );
+      } catch (e2) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ parsed: null, reason: "export_json_throw:" + String(e2) });
+      }
+    });
+  }
+
+  /** Table: data_cache → JSON export. Pivot: getViewerData → JSON export. */
+  function exportTableElementAsync(name, elType) {
+    return new Promise(function (resolve) {
+      var component = resolveTableComponent(name);
+      if (!component) {
+        resolve({
+          parsed: null,
+          reason:
+            "no_component report=" +
+            (resolveStiReport() ? "yes" : "no") +
+            " name=" +
+            name,
+        });
+        return;
+      }
+      var isPivot = elType === "StiPivotTableElement";
+      var first = isPivot
+        ? loadPivotViewerData(component)
+        : loadTableFromDataCache(component);
+      first.then(function (fromFirst) {
+        if (fromFirst.parsed && fromFirst.parsed.row_count) {
+          resolve(fromFirst);
+          return;
+        }
+        // Pivot: also try raw data cache as secondary
+        var second = isPivot
+          ? loadTableFromDataCache(component)
+          : Promise.resolve({ parsed: null, reason: "skip" });
+        second.then(function (fromSecond) {
+          if (fromSecond.parsed && fromSecond.parsed.row_count) {
+            resolve(fromSecond);
+            return;
+          }
+          exportTableJsonAsync(component).then(function (fromJson) {
+            if (fromJson.parsed && fromJson.parsed.row_count) {
+              resolve(fromJson);
+              return;
+            }
+            resolve({
+              parsed: null,
+              reason:
+                (fromFirst.reason || "first_fail") +
+                " | " +
+                (fromSecond.reason || "second_fail") +
+                " | " +
+                (fromJson.reason || "json_fail"),
+            });
+          });
+        });
+      });
+    });
+  }
+
+  function enrichViewportTables(vp) {
+    if (!vp || !Array.isArray(vp.elements)) {
+      return Promise.resolve(vp);
+    }
+    vp.export_debug = [];
+    var jobs = [];
+    vp.elements.forEach(function (el, idx) {
+      if (!el) return;
+      if (
+        el.type !== "StiTableElement" &&
+        el.type !== "StiPivotTableElement"
+      ) {
+        return;
+      }
+      jobs.push(
+        exportTableElementAsync(el.name, el.type).then(function (result) {
+          var exported = result && result.parsed;
+          var reason = (result && result.reason) || "unknown";
+          vp.export_debug.push({
+            name: el.name,
+            ok: !!(exported && exported.row_count),
+            capture: exported && exported.capture,
+            rows: exported && exported.row_count,
+            reason: reason,
+            prev_capture: el.capture,
+            type: el.type,
+          });
+          if (!exported || !exported.row_count) return;
+          el.columns = exported.columns;
+          el.rows = exported.rows;
+          el.row_count = exported.row_count;
+          el.capture = exported.capture || "data_cache";
+          if (exported.totals) el.totals = exported.totals;
+          vp.elements[idx] = el;
+        })
+      );
+    });
+    if (!jobs.length) return Promise.resolve(vp);
+    return Promise.all(jobs).then(function () {
+      return vp;
+    });
   }
 
   function elementTitle(attrs) {
@@ -1095,15 +1567,23 @@
 
   function postViewportAndCompare() {
     var vp = snapshotViewport(lastInteractionDump);
-    if (window.console && console.log) {
-      console.log("[viewport]", vp.elements.length, "elements", vp);
-    }
-    fetch("/api/viewport", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(vp),
-      cache: "no-store",
-    })
+    enrichViewportTables(vp)
+      .then(function (enriched) {
+        if (window.console && console.log) {
+          console.log(
+            "[viewport]",
+            enriched.elements.length,
+            "elements",
+            enriched
+          );
+        }
+        return fetch("/api/viewport", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(enriched),
+          cache: "no-store",
+        });
+      })
       .then(function () {
         return fetch("/api/compare", { cache: "no-store" });
       })
@@ -1138,6 +1618,7 @@
 
   window.dashCaptureInteraction = function (args) {
     try {
+      if (args && args.report) rememberStiReport(args.report);
       var dump = dumpArgs(args);
       lastInteractionDump = dump;
       var params = flattenParams(dump);
@@ -1169,6 +1650,9 @@
 
   window.dashRefreshLlmPack = refreshLlmPack;
   window.dashSnapshotViewport = snapshotViewport;
+  window.dashEnrichViewportTables = enrichViewportTables;
+  window.dashExportTableElementAsync = exportTableElementAsync;
+  window.dashShowStructure = postViewportAndStructure;
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", function () {

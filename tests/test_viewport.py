@@ -59,6 +59,36 @@ class ViewportPackUnitTests(unittest.TestCase):
         self.assertIn("KPI1", text)
         self.assertIn("100", text)
 
+    def test_compare_shows_export_debug(self) -> None:
+        pack = build_viewport_pack(
+            {
+                "elements": [
+                    {
+                        "name": "T1",
+                        "type": "StiTableElement",
+                        "columns": ["a"],
+                        "rows": [{"a": 1}],
+                        "row_count": 1,
+                        "capture": "html_sti",
+                    }
+                ],
+                "export_debug": [
+                    {
+                        "name": "T1",
+                        "ok": False,
+                        "capture": None,
+                        "rows": None,
+                        "reason": "no_component report=no",
+                        "prev_capture": "html_sti",
+                    }
+                ],
+            }
+        )
+        text = build_viewport_compare_text(pack)
+        self.assertIn("TABLE DATA PIPELINE", text)
+        self.assertIn("no_component", text)
+        self.assertIn("html_sti", text)
+
 
 class ViewportApiTests(unittest.TestCase):
     def setUp(self) -> None:
