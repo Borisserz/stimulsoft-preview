@@ -671,6 +671,7 @@
       var any = false;
       for (var i = 0; i < columns.length; i++) {
         var v = cellValue(row[i]);
+        if (typeof v === "string") v = v.replace(/\s+/g, " ").trim();
         obj[columns[i]] = v;
         if (v !== null && v !== undefined && v !== "") any = true;
       }
@@ -684,79 +685,138 @@
     };
   }
 
+  function htmlCellText(cell) {
+    if (!cell) return "";
+    return String(cell.innerText || cell.textContent || "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function looksLikeDigitHeader(name) {
+    var s = String(name || "").replace(/\s/g, "");
+    return s.length > 0 && /^[\d.,\-%]+$/.test(s);
+  }
+
   function scrapeHtmlTables(root) {
-    // Structured fallback: never smash the whole table into one string.
-    if (!root) return null;
-    var tables = root.getElementsByTagName
-      ? root.getElementsByTagName("table")
-      : [];
-    var best = null;
+    /**
+     * Stimulsoft DataGrid = several <table>s:
+     *   1) header table (1 row of labels)
+     *   2) body table (ONLY data rows — row0 is NOT a header!)
+     *   3) optional footer
+     * Old scrape treated body row0 as headers → amounts "split" across rows.
+     */
+    if (!root || !root.getElementsByTagName) return null;
+    var tables = root.getElementsByTagName("table");
+    var headerNames = null;
+    var bodyTable = null;
+    var bodyScore = -1;
+
     for (var t = 0; t < tables.length; t++) {
       var table = tables[t];
       var trs = table.rows;
-      if (!trs || trs.length < 2) continue;
-      var headerCells = trs[0].cells;
-      if (!headerCells || headerCells.length < 2) continue; // skip 1-col chrome
-      var rawNames = [];
-      for (var c = 0; c < headerCells.length; c++) {
-        rawNames.push(
-          String(headerCells[c].innerText || headerCells[c].textContent || "")
-            .replace(/\s+/g, " ")
-            .trim() || "c" + c
-        );
-      }
-      // skip if header looks like one smashed sentence (few cells but huge text)
-      if (headerCells.length <= 2 && rawNames.join(" ").length > 80) continue;
-      var columns = uniqueColumns(rawNames);
-      var rows = [];
-      for (var r = 1; r < trs.length; r++) {
-        var cells = trs[r].cells;
-        if (!cells || cells.length < 1) continue;
-        // misaligned / nested chrome rows
-        if (cells.length + 2 < columns.length) continue;
-        var obj = {};
-        var any = false;
-        for (var i = 0; i < columns.length; i++) {
-          var cell = cells[i];
-          var v = cell
-            ? String(cell.innerText || cell.textContent || "")
-                .replace(/\s+/g, " ")
-                .trim()
-            : "";
-          obj[columns[i]] = v;
-          if (v) any = true;
+      if (!trs || trs.length < 1) continue;
+      var row0 = trs[0];
+      if (!row0 || !row0.cells || row0.cells.length < 2) continue;
+
+      if (trs.length === 1) {
+        var names = [];
+        var digitish = 0;
+        for (var c = 0; c < row0.cells.length; c++) {
+          var nm = htmlCellText(row0.cells[c]) || "c" + c;
+          names.push(nm);
+          if (looksLikeDigitHeader(nm)) digitish++;
         }
-        if (any) rows.push(obj);
+        // real column header row: mostly labels, not numbers
+        if (digitish * 2 < names.length) headerNames = names;
+        continue;
       }
-      if (rows.length < 1) continue;
-      var cand = {
-        columns: columns,
-        rows: rows,
-        row_count: rows.length,
-        capture: "html",
-      };
-      if (!best || tableScore(cand) > tableScore(best)) best = cand;
+
+      // candidate body / footer: many rows
+      var sc = trs.length * row0.cells.length;
+      if (sc > bodyScore) {
+        bodyScore = sc;
+        bodyTable = table;
+      }
     }
-    return best;
+
+    if (!bodyTable || !bodyTable.rows || bodyTable.rows.length < 1) return null;
+
+    var columns;
+    var startRow;
+    if (headerNames && headerNames.length) {
+      columns = uniqueColumns(headerNames);
+      startRow = 0; // every body row is data
+    } else {
+      // no separate header table — only use row0 as header if it looks like labels
+      var hc = bodyTable.rows[0].cells;
+      var trial = [];
+      var d = 0;
+      for (var i = 0; i < hc.length; i++) {
+        var tn = htmlCellText(hc[i]) || "c" + i;
+        trial.push(tn);
+        if (looksLikeDigitHeader(tn)) d++;
+      }
+      if (d * 2 >= trial.length) {
+        // row0 is data (digits) — synthesize col names
+        columns = uniqueColumns(
+          trial.map(function (_x, idx) {
+            return "c" + idx;
+          })
+        );
+        startRow = 0;
+      } else {
+        columns = uniqueColumns(trial);
+        startRow = 1;
+      }
+    }
+
+    // If body width != header width, trust body width and pad names
+    var bodyWidth = bodyTable.rows[0].cells.length;
+    if (bodyWidth > columns.length) {
+      for (var p = columns.length; p < bodyWidth; p++) columns.push("c" + p);
+      columns = uniqueColumns(columns);
+    }
+
+    var rows = [];
+    for (var r = startRow; r < bodyTable.rows.length; r++) {
+      var cells = bodyTable.rows[r].cells;
+      if (!cells || cells.length < 1) continue;
+      var obj = {};
+      var any = false;
+      for (var j = 0; j < columns.length; j++) {
+        var v = cells[j] ? htmlCellText(cells[j]) : "";
+        obj[columns[j]] = v;
+        if (v) any = true;
+      }
+      if (any) rows.push(obj);
+    }
+    if (!rows.length) return null;
+    return {
+      columns: columns,
+      rows: rows,
+      row_count: rows.length,
+      capture: headerNames ? "html_sti" : "html",
+    };
   }
 
   function captureTableElement(domEl, ca) {
     var dg = domEl.dataGrid || null;
-    var visible =
-      (dg && dg.data) || (ca && ca.data) || null;
-    var hidden =
-      (dg && dg.hiddenData) || (ca && ca.hiddenData) || null;
+    var visible = (dg && dg.data) || (ca && ca.data) || null;
+    var hidden = (dg && dg.hiddenData) || (ca && ca.hiddenData) || null;
     var merged = mergeVisibleAndHidden(visible, hidden);
     var parsed = parseGridData(
       merged,
-      hidden && hidden.length ? "grid+hidden" : "grid"
+      hidden && hidden.length && Array.isArray(hidden[0]) && hidden[0].length
+        ? "grid+hidden"
+        : "grid"
     );
+    // CRITICAL: never let broken HTML override a good grid parse
+    // (that caused amount digits to "split" across rows).
+    if (parsed && parsed.row_count > 0) return parsed;
+
     var htmlParsed = scrapeHtmlTables(domEl);
-    // pick richest: more columns + numeric cells wins (not just row count)
-    var best = null;
-    if (parsed && parsed.row_count > 0) best = parsed;
-    if (htmlParsed && tableScore(htmlParsed) > tableScore(best)) best = htmlParsed;
-    if (best) return best;
+    if (htmlParsed && htmlParsed.row_count > 0) return htmlParsed;
+
     if (parsed && parsed.columns && parsed.columns.length) {
       return {
         columns: parsed.columns,
@@ -770,9 +830,13 @@
 
   function elementTitle(attrs) {
     var ca = attrs && attrs.contentAttributes;
-    if (!ca) return null;
-    if (ca.title != null && typeof ca.title !== "object") return String(ca.title);
-    if (ca.title && ca.title.text != null) return String(ca.title.text);
+    if (ca) {
+      if (ca.title != null && typeof ca.title !== "object") return String(ca.title);
+      if (ca.title && ca.title.text != null) return String(ca.title.text);
+      if (ca.titleText != null) return String(ca.titleText);
+      if (ca.headerText != null) return String(ca.headerText);
+    }
+    if (attrs && attrs.alias) return String(attrs.alias);
     return null;
   }
 
@@ -820,6 +884,7 @@
       out.rows = table.rows;
       out.row_count = table.row_count;
       out.capture = table.capture;
+      if (!out.title) out.title = String(attrs.name || name);
       // NEVER smash the whole table into one text string
       return out;
     }

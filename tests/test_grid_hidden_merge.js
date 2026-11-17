@@ -110,3 +110,19 @@ assert(parsed.rows[0]["Сумма"] === 1500.5, "amount value");
 assert(parsed.rows[0]["Наименование платежа"] === "Налог на прибыль", "name intact");
 assert(parsed.rows[0]["Регион"] === "Брестская", "region intact");
 console.log("OK grid hidden merge", parsed.columns, parsed.rows[0]);
+
+// Simulate: HTML mis-parse must NOT beat grid (regression of amount-split-across-rows)
+function pickCapture(gridParsed, htmlParsed) {
+  if (gridParsed && gridParsed.row_count > 0) return gridParsed;
+  return htmlParsed;
+}
+var htmlBroken = {
+  columns: ["c0"],
+  rows: [{ c0: "1" }, { c0: "5" }, { c0: "0" }, { c0: "0" }],
+  row_count: 4,
+  capture: "html",
+};
+var picked = pickCapture(parsed, htmlBroken);
+assert(picked.capture !== "html", "grid must win over broken html");
+assert(picked.rows[0]["Сумма"] === 1500.5, "kept amount from grid");
+console.log("OK grid wins over broken html");
