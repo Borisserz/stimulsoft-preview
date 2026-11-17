@@ -175,6 +175,8 @@
     return (
       lower === "close" ||
       lower === "закрыть" ||
+      lower === "cancel" ||
+      lower === "отмена" ||
       lower === "save" ||
       lower === "сохранить" ||
       lower === "more" ||
@@ -469,19 +471,37 @@
     return n;
   }
 
+  function chunkNumericRows(rows) {
+    var n = 0;
+    for (var i = 0; i < (rows || []).length; i++) {
+      if (countNums(expandCells(rows[i])) >= 1) n++;
+    }
+    return n;
+  }
+
+  function looksLikePaymentHeader(name) {
+    var t = normLabel(name);
+    if (!t || t.length < 8) return false;
+    if (/факт|план|выполнен|бюджет|наименование|регион|имнс|управлен|отдел/i.test(t))
+      return false;
+    return /налог|акциз|ндс|дивиденд|поступлен/i.test(t);
+  }
+
   /**
    * Painted Stimulsoft pivot: header rows (colspan groups) + body.
-   * Close/toolbar cells are dropped. Amounts stay inside one cell.
+   * Close/Cancel/toolbar cells are dropped. Amounts stay inside one cell.
    */
   function parseHtmlGrid(rows) {
     if (!Array.isArray(rows) || rows.length < 2) return null;
     var expanded = [];
     for (var i = 0; i < rows.length; i++) {
-      var exp = expandCells(rows[i]);
+      var exp = expandCells(rows[i]).map(function (t) {
+        return isChromeLabel(t) ? "" : t;
+      });
       if (!exp.length) continue;
       var onlyChrome = true;
       for (var e = 0; e < exp.length; e++) {
-        if (exp[e] && !isChromeLabel(exp[e])) {
+        if (exp[e]) {
           onlyChrome = false;
           break;
         }
@@ -495,6 +515,24 @@
       if (countNums(expanded[headerEnd]) >= 1) break;
     }
     if (headerEnd === 0 || headerEnd >= expanded.length) return null;
+    // Payment-name-only rows before numbers come from a separate label table — drop them.
+    while (headerEnd > 1) {
+      var prev = expanded[headerEnd - 1] || [];
+      var nonEmpty = 0;
+      var paymentish = 0;
+      for (var p = 0; p < prev.length; p++) {
+        if (!prev[p]) continue;
+        nonEmpty++;
+        if (looksLikePaymentHeader(prev[p])) paymentish++;
+      }
+      if (nonEmpty > 0 && paymentish === nonEmpty) {
+        expanded.splice(headerEnd - 1, 1);
+        headerEnd--;
+        continue;
+      }
+      break;
+    }
+    if (headerEnd < 1 || headerEnd >= expanded.length) return null;
     var width = 0;
     for (var w = 0; w < expanded.length; w++) {
       if (expanded[w].length > width) width = expanded[w].length;
@@ -504,7 +542,8 @@
       var parts = [];
       for (var hr = 0; hr < headerEnd; hr++) {
         var t = expanded[hr][c] || "";
-        if (!t || isChromeLabel(t) || looksNumericLabel(t)) continue;
+        if (!t || isChromeLabel(t) || looksNumericLabel(t) || looksLikePaymentHeader(t))
+          continue;
         if (parts.indexOf(t) < 0) parts.push(t);
       }
       names.push(parts.join(" / ") || "c" + c);
@@ -512,7 +551,8 @@
     var keep = [];
     var keptNames = [];
     for (var k = 0; k < names.length; k++) {
-      if (!names[k] || isChromeLabel(names[k])) continue;
+      if (!names[k] || isChromeLabel(names[k]) || looksLikePaymentHeader(names[k]))
+        continue;
       keep.push(k);
       keptNames.push(names[k]);
     }
@@ -536,6 +576,66 @@
       row_count: outRows.length,
       capture: "html_grid",
     };
+  }
+
+  /**
+   * Stimulsoft paints header / body / footer as separate <table>s.
+   * Blind vertical concat turns payment rows into column names.
+   * Keep header-like chunks (no numbers) above the best body chunk only.
+   */
+  function joinPivotHtmlChunks(chunks) {
+    if (!Array.isArray(chunks) || !chunks.length) return null;
+    var headers = [];
+    var bodies = [];
+    for (var i = 0; i < chunks.length; i++) {
+      var ch = chunks[i];
+      if (!ch || !ch.length) continue;
+      if (chunkNumericRows(ch) < 1) headers.push(ch);
+      else bodies.push(ch);
+    }
+    var best = null;
+    var bestScore = -1;
+    function consider(rows) {
+      var parsed = parseHtmlGrid(rows);
+      if (!parsed || !parsed.row_count) return;
+      var sc = pivotDataScore(parsed);
+      // Prefer real budget headers over smashed payment-name columns
+      for (var c = 0; c < (parsed.columns || []).length; c++) {
+        if (looksLikePaymentHeader(parsed.columns[c])) sc -= 50;
+      }
+      if (sc > bestScore) {
+        best = parsed;
+        bestScore = sc;
+      }
+    }
+    for (var b = 0; b < bodies.length; b++) {
+      consider(bodies[b]);
+      for (var h = 0; h < headers.length; h++) {
+        consider(headers[h].concat(bodies[b]));
+      }
+      if (headers.length > 1) {
+        var allH = [];
+        for (var hh = 0; hh < headers.length; hh++) allH = allH.concat(headers[hh]);
+        // Only title/header tables that are wide enough — skip label-only skinny tables
+        var wideH = headers.filter(function (hdr) {
+          var max = 0;
+          for (var r = 0; r < hdr.length; r++) {
+            var w = expandCells(hdr[r]).filter(function (t) {
+              return t && !isChromeLabel(t);
+            }).length;
+            if (w > max) max = w;
+          }
+          return max >= 2;
+        });
+        if (wideH.length) {
+          var mergedH = [];
+          for (var m = 0; m < wideH.length; m++) mergedH = mergedH.concat(wideH[m]);
+          consider(mergedH.concat(bodies[b]));
+        }
+      }
+    }
+    if (!bodies.length) consider([].concat.apply([], chunks));
+    return bestScore > 0 ? best : null;
   }
 
   /** Non-zero painted numbers. Total/Итог with 0,0 scores 0. */
@@ -586,16 +686,20 @@
   }
 
   /**
-   * Attrs (selected SVG) overwrite. Labels fill regions whose elementvalue is empty.
+   * Primary list defines membership/order. Secondary fills empty amount/percent.
+   * allowNew:false — after map drill, do not invent oblasts missing on the painted SVG.
    */
-  function mergeRegionLists(fromAttrs, fromLabels) {
+  function mergeRegionLists(primary, secondary, opts) {
+    opts = opts || {};
+    var allowNew = opts.allowNew !== false;
     var by = {};
     var order = [];
-    function take(r, overwrite) {
+    function take(r, overwrite, canAdd) {
       if (!r || !r.name) return;
       var name = mapKeyToRu(r.name);
       if (!name) return;
       if (!by[name]) {
+        if (!canAdd) return;
         by[name] = { name: name, amount: null, percent: null, value: null };
         order.push(name);
       }
@@ -605,11 +709,11 @@
       if (r.value && (overwrite || !dst.value)) dst.value = r.value;
       if (!dst.value) dst.value = dst.amount || dst.percent || null;
     }
-    (fromLabels || []).forEach(function (r) {
-      take(r, false);
+    (primary || []).forEach(function (r) {
+      take(r, true, true);
     });
-    (fromAttrs || []).forEach(function (r) {
-      take(r, true);
+    (secondary || []).forEach(function (r) {
+      take(r, false, allowNew);
     });
     return order.map(function (n) {
       return by[n];
@@ -656,6 +760,7 @@
     parseExportJson: parseExportJson,
     parsePivotViewerData: parsePivotViewerData,
     parseHtmlGrid: parseHtmlGrid,
+    joinPivotHtmlChunks: joinPivotHtmlChunks,
     pivotDataScore: pivotDataScore,
     pickPivotSource: pickPivotSource,
     mergeRegionLists: mergeRegionLists,

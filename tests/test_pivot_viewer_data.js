@@ -174,7 +174,78 @@ ok(regionNamed(merged, "Гомельская").percent === "18,2%", "gomel from 
 ok(regionNamed(merged, "Витебская").percent === "9,1%", "vitebsk from labels");
 ok(regionNamed(merged, "Минск").percent === "33,3%", "minsk from labels");
 
+// After drill the map paints only Brest; cache still has all oblasts — do not invent them.
+var drilledMap = mod.mergeRegionLists(
+  [{ name: "Брестская", amount: "7 099,31 руб.", percent: "31,0 %", value: "7 099,31 руб." }],
+  [
+    { name: "Гомельская", amount: "12 000 руб.", percent: "18,2%", value: "12 000 руб." },
+    { name: "Витебская", amount: null, percent: "9,1%", value: "9,1%" },
+    { name: "Минск", amount: "23 414,38 руб.", percent: "33,3%", value: "23 414,38 руб." },
+  ],
+  { allowNew: false }
+);
+ok(drilledMap.length === 1, "drilled map only Brest " + drilledMap.length);
+ok(drilledMap[0].name === "Брестская", "drilled name");
+
+// Stimulsoft: separate header / label-only / body tables. Blind concat smashes payments into columns.
+var stiHeader = [
+  [
+    { text: "Cancel" },
+    { text: "Сводная таблица", colspan: 3 },
+  ],
+  ["Наименование платежа", "ИМНС", "Факт (руб.)", "План (руб.)"],
+];
+var stiLabelsOnly = [
+  ["Единый налог с ИП и иных физических лиц"],
+  ["Акцизы на нефть"],
+  ["Экологический налог, всего"],
+];
+var stiBody = [
+  ["Единый налог с ИП и иных физических лиц", "", "29 370,1", "168"],
+  ["Акцизы на спирт этиловый", "", "142 218,4", "56"],
+  ["НДС по оборотам", "", "143 982,3", "111"],
+  ["Итог", "", "722 087,2", "979"],
+];
+var recovered = mod.parseHtmlGrid(stiHeader.concat(stiLabelsOnly).concat(stiBody));
+ok(recovered && recovered.row_count === 4, "recover rows " + (recovered && recovered.row_count));
+ok(
+  recovered.columns.every(function (c) {
+    return c.indexOf("Акцизы на нефть") < 0 && c.indexOf("Единый налог") < 0;
+  }),
+  "recover drops payment headers " + (recovered && recovered.columns)
+);
+var joined = mod.joinPivotHtmlChunks([stiHeader, stiLabelsOnly, stiBody]);
+ok(joined && joined.capture === "html_grid", "joined tag");
+ok(joined.row_count === 4, "joined 4 rows " + (joined && joined.row_count));
+ok(
+  joined.columns.every(function (c) {
+    return c.indexOf("Акцизы на нефть") < 0 && c.indexOf("Единый налог") < 0;
+  }),
+  "payments are rows not columns " + joined.columns
+);
+ok(joined.columns.join(" ").indexOf("Cancel") < 0, "no Cancel " + joined.columns);
+var jFact = joined.columns.filter(function (c) {
+  return c.indexOf("Факт") >= 0;
+})[0];
+ok(jFact, "fact col " + joined.columns);
+ok(joined.rows[0][jFact] === "29 370,1", "brest first " + JSON.stringify(joined.rows[0]));
+ok(joined.rows[3][jFact] === "722 087,2", "brest total " + JSON.stringify(joined.rows[3]));
+ok(joined.rows[0][joined.columns[0]].indexOf("Единый налог") >= 0, "payment in row");
+
+var pinskJoined = mod.joinPivotHtmlChunks([
+  [
+    ["Наименование платежа", "Управление/отдел", "Факт (руб.)", "План (руб.)"],
+  ],
+  [
+    ["Земельный налог, всего", "", "1 027,2", "2 881,7"],
+    ["Экологический налог, всего", "", "1 493,2", "1 428,0"],
+    ["Итог", "", "7 220,9", "9 797,2"],
+  ],
+]);
+ok(pinskJoined && pinskJoined.rows[2]["Факт (руб.)"] === "7 220,9", "pinsk 7220,9");
+
 ok(mod.mapKeyToRu("BY-BR") === "Брестская", "BY-BR");
+ok(mod.isChromeLabel("Cancel") === true, "Cancel chrome");
 ok(mod.mapKeyToRu("GomelskayaVoblasts") === "Гомельская", "gomel");
 
 ok(mod.isChromeLabel("Close") === true, "Close is chrome");

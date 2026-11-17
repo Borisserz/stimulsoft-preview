@@ -1109,33 +1109,25 @@
   /** Painted pivot tables. Used when getViewerData is only Total/Итог = 0,0. */
   function capturePivotHtml(domEl) {
     var api = window.dashExportJson;
-    if (!domEl || !api || typeof api.parseHtmlGrid !== "function") return null;
+    if (!domEl || !api) return null;
     var tables = domEl.getElementsByTagName("table");
     var chunks = [];
-    var best = null;
-    var bestScore = -1;
-    function consider(parsed) {
-      if (!parsed || !parsed.row_count) return;
-      parsed.capture = "html_grid";
-      var sc = api.pivotDataScore(parsed);
-      if (sc > bestScore) {
-        best = parsed;
-        bestScore = sc;
-      }
-    }
     for (var i = 0; i < tables.length; i++) {
       if (tables[i].getElementsByTagName("table").length > 0) continue;
       var matrix = tableToMatrix(tables[i]);
       if (!matrix.length) continue;
       chunks.push(matrix);
-      consider(api.parseHtmlGrid(matrix));
     }
-    if (chunks.length > 1) {
-      var all = [];
-      for (var c = 0; c < chunks.length; c++) all = all.concat(chunks[c]);
-      consider(api.parseHtmlGrid(all));
-    }
-    return bestScore > 0 ? best : null;
+    if (!chunks.length) return null;
+    var parsed =
+      typeof api.joinPivotHtmlChunks === "function"
+        ? api.joinPivotHtmlChunks(chunks)
+        : api.parseHtmlGrid
+          ? api.parseHtmlGrid([].concat.apply([], chunks))
+          : null;
+    if (!parsed || !parsed.row_count) return null;
+    parsed.capture = "html_grid";
+    return parsed;
   }
 
   function resolveTableComponent(name) {
@@ -1486,26 +1478,15 @@
   }
 
   function mergeMapRegions(painted, cached) {
-    var by = {};
-    var order = [];
-    var ru = window.dashExportJson && window.dashExportJson.mapKeyToRu;
-    function take(r) {
-      if (!r || !r.name) return;
-      var name = ru ? ru(r.name) : r.name;
-      if (!by[name]) {
-        by[name] = { name: name, amount: null, percent: null, value: null };
-        order.push(name);
-      }
-      var dst = by[name];
-      if (r.amount && !dst.amount) dst.amount = r.amount;
-      if (r.percent && !dst.percent) dst.percent = r.percent;
-      if (r.value && !dst.value) dst.value = r.value;
+    var api = window.dashExportJson;
+    if (api && typeof api.mergeRegionLists === "function") {
+      // Painted SVG is truth for WHICH regions exist after drill.
+      // Cache may still hold all oblasts — never invent them on a drilled map.
+      return api.mergeRegionLists(painted || [], cached || [], {
+        allowNew: !(painted && painted.length),
+      });
     }
-    (painted || []).forEach(take);
-    (cached || []).forEach(take);
-    return order.map(function (n) {
-      return by[n];
-    });
+    return painted && painted.length ? painted : cached || [];
   }
 
   function enrichViewportTables(vp) {
@@ -1696,7 +1677,10 @@
     walkRoot(domEl);
     var labeled = api.pairRegionLabels(lines);
     if (typeof api.mergeRegionLists === "function") {
-      return api.mergeRegionLists(fromAttrs, labeled);
+      // Attr paths define membership; labels only fill empty amount/percent.
+      return api.mergeRegionLists(fromAttrs, labeled, {
+        allowNew: !fromAttrs.length,
+      });
     }
     return fromAttrs.length ? fromAttrs : labeled;
   }
