@@ -47,6 +47,7 @@ from stimulsoft_reports.report.dictionary.StiVariable import StiVariable
 from stimulsoft_reports.report.enums.StiVariableType import StiVariableType
 from stimulsoft_reports.viewer import StiViewer
 
+from query_request import QueryFilterError, filters_from_body, viewer_path
 from llm_pack import (
     build_results_digest,
     build_verify_report,
@@ -716,6 +717,28 @@ def post_viewport():
     return Response(
         dumps_llm_pack({"ok": True, "llm_pack": pack}).encode("utf-8"),
         content_type="application/json; charset=utf-8",
+    )
+
+
+@app.post("/api/query")
+def post_query():
+    """Set year, month, and money type. Same values open /viewer. No dashboard JSON yet."""
+    body = request.get_json(silent=True) if request.is_json else None
+    if not isinstance(body, dict):
+        body = _body_params()
+    try:
+        filters = filters_from_body(body)
+    except QueryFilterError as exc:
+        return Response(str(exc), status=400)
+    updated = params_update(filters, clear_results_on_change=True)
+    kept = {key: str(updated[key]) for key in filters if key in updated}
+    return jsonify(
+        {
+            "ok": True,
+            "params": kept,
+            "viewer": viewer_path(kept),
+            "ready": False,
+        }
     )
 
 
