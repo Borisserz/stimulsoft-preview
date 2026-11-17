@@ -65,6 +65,43 @@ ok(brest.amount === "7 090,57 руб.", "brest money");
 var blob = mod.regionFromBlob("Брестская 7 090,57 руб. 31,0%");
 ok(blob && blob.name === "Брестская", "blob name " + JSON.stringify(blob));
 ok(blob.percent === "31,0%", "blob percent");
+var brestSvg = mod.regionFromAttrs(
+  "BrestskaiaVoblasts",
+  "7\u00a0099,31 руб. 31,0 %"
+);
+ok(brestSvg && brestSvg.name === "Брестская", "svg name " + JSON.stringify(brestSvg));
+ok(brestSvg.percent === "31,0 %", "svg percent " + brestSvg.percent);
+ok(brestSvg.amount && brestSvg.amount.indexOf("099,31") >= 0, "svg amount");
+
+// headerHeight too large must not drop the data rows (only Total left)
+var swollen = {
+  headerHeight: 4,
+  headerWidth: 1,
+  cells: [
+    [
+      { text: "Наименование" },
+      { text: "НДС" },
+      { text: "Прибыль" },
+      { text: "Итого" },
+    ],
+    [
+      { text: "Факт (руб.)" },
+      { text: "7090,57" },
+      { text: "300" },
+      { text: "7390,57" },
+    ],
+    [
+      { text: "План (руб.)" },
+      { text: "8000" },
+      { text: "400" },
+      { text: "8400" },
+    ],
+  ],
+};
+var wide = mod.parsePivotViewerData(swollen);
+ok(wide && wide.row_count === 3, "kept data rows " + (wide && wide.row_count));
+ok(wide.rows[0]["Наименование"] === "НДС", "first data is НДС");
+
 ok(mod.mapKeyToRu("BY-BR") === "Брестская", "BY-BR");
 ok(mod.mapKeyToRu("GomelskayaVoblasts") === "Гомельская", "gomel");
 

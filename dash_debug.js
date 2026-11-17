@@ -1523,6 +1523,7 @@
       seen[t] = true;
       lines.push(t);
     }
+    var fromAttrs = [];
     function walkRoot(root) {
       if (!root || !root.getElementsByTagName) return;
       try {
@@ -1539,35 +1540,52 @@
           } catch (e1) {}
           continue;
         }
+        if (node.getAttribute) {
+          var arg =
+            node.getAttribute("elementargument") ||
+            node.getAttribute("elementident");
+          var val = node.getAttribute("elementvalue");
+          if (arg && api.regionFromAttrs) {
+            var hit = api.regionFromAttrs(arg, val || node.textContent || "");
+            if (hit) fromAttrs.push(hit);
+          }
+        }
         if (
           tag !== "text" &&
           tag !== "tspan" &&
           tag !== "title" &&
           tag !== "div" &&
-          tag !== "span"
+          tag !== "span" &&
+          tag !== "path"
         ) {
           continue;
         }
         pushLine(node.textContent);
+        if (node.getAttribute && node.getAttribute("text"))
+          pushLine(node.getAttribute("text"));
       }
     }
     walkRoot(domEl);
-    var regions = api.pairRegionLabels(lines);
-    // Attach elementvalue when the geom's argument matches a region name
-    if (regions.length) {
-      var byName = {};
-      regions.forEach(function (r) {
-        byName[r.name] = r;
+    if (fromAttrs.length) {
+      var by = {};
+      var order = [];
+      fromAttrs.forEach(function (r) {
+        if (!r || !r.name) return;
+        if (!by[r.name]) {
+          by[r.name] = r;
+          order.push(r.name);
+          return;
+        }
+        var dst = by[r.name];
+        if (r.amount && !dst.amount) dst.amount = r.amount;
+        if (r.percent && !dst.percent) dst.percent = r.percent;
+        if (r.value && !dst.value) dst.value = r.value;
       });
-      for (var j = 0; j < nodes.length; j++) {
-        var n = nodes[j];
-        if (!n.getAttribute) continue;
-        var a = n.getAttribute("elementargument");
-        var v = n.getAttribute("elementvalue");
-        if (a && v && byName[a] && !byName[a].value) byName[a].value = v;
-      }
+      return order.map(function (n) {
+        return by[n];
+      });
     }
-    return regions;
+    return api.pairRegionLabels(lines);
   }
 
   function visibleText(el, maxLen) {
@@ -1758,12 +1776,26 @@
         panel[k] = flat[k];
       });
     }
+    var dashboard = collectDashboardFilters(
+      elements,
+      interaction || lastInteractionDump
+    );
+    // Breadcrumb after DashboardDrillDown: "Брестская область", "ИМНС по Пинскому р-ну"
+    elements.forEach(function (el) {
+      if (!el || String(el.type).indexOf("Text") < 0) return;
+      var t = String(el.text || "")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (!t || t === "/" || t.length > 80) return;
+      if (!/област|р-н|р-ну|район|ИМНС/i.test(t)) return;
+      dashboard.push({ path: "drill", value: t, condition: "EqualTo" });
+    });
     return {
       captured_at: new Date().toISOString(),
       interaction: interaction || lastInteractionDump || null,
       filters: {
         panel: panel,
-        dashboard: collectDashboardFilters(elements, interaction || lastInteractionDump),
+        dashboard: dashboard,
       },
       elements: elements,
     };

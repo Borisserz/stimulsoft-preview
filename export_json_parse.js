@@ -194,7 +194,11 @@
   }
 
   function normLabel(v) {
-    return String(v == null ? "" : v).replace(/\s+/g, " ").trim();
+    return String(v == null ? "" : v)
+      .replace(/&nbsp;/gi, " ")
+      .replace(/\u00a0/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
   function looksNumericLabel(v) {
@@ -225,14 +229,34 @@
         rowCount = cells[c0].length;
     }
     if (rowCount < 1) return null;
-    if (headerHeight >= rowCount) headerHeight = 0;
     if (headerWidth > colCount) headerWidth = colCount;
+    if (headerHeight > rowCount) headerHeight = rowCount;
 
     function at(col, row) {
       var column = cells[col];
       if (!Array.isArray(column)) return "";
       return normLabel(cellText(column[row]));
     }
+
+    // Reported headerHeight sometimes swallows data rows, leaving only Total/Итого.
+    // First visual row with 2+ numbers is the real body start.
+    var dataStart = headerHeight;
+    for (var rr = 0; rr < rowCount; rr++) {
+      var nums = 0;
+      for (var cc = 0; cc < colCount; cc++) {
+        var cell = at(cc, rr);
+        if (!cell) continue;
+        if (looksNumericLabel(cell) || (/\d/.test(cell) && /%/.test(cell)))
+          nums++;
+      }
+      if (nums >= 2) {
+        dataStart = rr;
+        break;
+      }
+    }
+    if (dataStart > 0 && dataStart < headerHeight) headerHeight = dataStart;
+    if (headerHeight >= rowCount && dataStart > 0 && dataStart < rowCount)
+      headerHeight = dataStart;
 
     var rawNames = [];
     for (var c = 0; c < colCount; c++) {
@@ -313,7 +337,9 @@
     "BY-MA": "Могилёвская",
     "BY-VI": "Витебская",
     BrestskayaVoblasts: "Брестская",
+    BrestskaiaVoblasts: "Брестская",
     Brestskaya: "Брестская",
+    Brestskaia: "Брестская",
     GomelskayaVoblasts: "Гомельская",
     GrodnenskayaVoblasts: "Гродненская",
     MinskayaVoblasts: "Минская",
@@ -329,7 +355,33 @@
     if (MAP_KEY_RU[t]) return MAP_KEY_RU[t];
     var compact = t.replace(/\s+/g, "");
     if (MAP_KEY_RU[compact]) return MAP_KEY_RU[compact];
+    var low = compact.toLowerCase();
+    if (low.indexOf("minskaya") >= 0 || low.indexOf("minskaia") >= 0) return "Минская";
+    if (low.indexOf("brest") >= 0) return "Брестская";
+    if (low.indexOf("gomel") >= 0 || low.indexOf("homel") >= 0) return "Гомельская";
+    if (low.indexOf("grodn") >= 0 || low.indexOf("hrodn") >= 0) return "Гродненская";
+    if (low.indexOf("mogil") >= 0 || low.indexOf("mahile") >= 0) return "Могилёвская";
+    if (low.indexOf("viteb") >= 0 || low.indexOf("vicieb") >= 0) return "Витебская";
+    if (low === "minsk") return "Минск";
     return t;
+  }
+
+  /** SVG path: elementargument + elementvalue="7 099,31 руб. 31,0 %" */
+  function regionFromAttrs(argument, valueText) {
+    var name = mapKeyToRu(argument);
+    if (!name) return null;
+    var decoded = normLabel(valueText);
+    var percent = takePercent(decoded);
+    var amount = takeMoney(decoded);
+    if (!percent && !amount && !decoded) {
+      return { name: name, amount: null, percent: null, value: null };
+    }
+    return {
+      name: name,
+      amount: amount,
+      percent: percent,
+      value: amount || percent || decoded,
+    };
   }
 
   function takeMoney(text) {
@@ -415,6 +467,7 @@
     pairRegionLabels: pairRegionLabels,
     mapKeyToRu: mapKeyToRu,
     regionFromBlob: regionFromBlob,
+    regionFromAttrs: regionFromAttrs,
     isChromeLabel: isChromeLabel,
   };
 
