@@ -22,6 +22,8 @@ def structure_from_viewport(viewport: dict[str, Any] | None) -> dict[str, Any]:
         }
         if "checked" in el:
             item["checked"] = bool(el.get("checked"))
+        if el.get("group"):
+            item["group"] = el.get("group")
         if el.get("value") is not None:
             item["value"] = el.get("value")
         if el.get("text") is not None:
@@ -127,6 +129,8 @@ def build_structure_text(structure: dict[str, Any] | None) -> str:
                 bits.append(f"title={title!r}")
             if "checked" in el:
                 bits.append(f"checked={el.get('checked')}")
+            if el.get("group"):
+                bits.append(f"group={el.get('group')!r}")
             if el.get("value") is not None:
                 bits.append(f"value={el.get('value')!r}")
             if el.get("text") is not None:

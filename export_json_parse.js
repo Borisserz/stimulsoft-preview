@@ -304,8 +304,74 @@
     return /[A-Za-zА-Яа-яЁё]/.test(t);
   }
 
+  var MAP_KEY_RU = {
+    "BY-BR": "Брестская",
+    "BY-HO": "Гомельская",
+    "BY-HR": "Гродненская",
+    "BY-HM": "Минск",
+    "BY-MI": "Минская",
+    "BY-MA": "Могилёвская",
+    "BY-VI": "Витебская",
+    BrestskayaVoblasts: "Брестская",
+    Brestskaya: "Брестская",
+    GomelskayaVoblasts: "Гомельская",
+    GrodnenskayaVoblasts: "Гродненская",
+    MinskayaVoblasts: "Минская",
+    MogilevskayaVoblasts: "Могилёвская",
+    VitebskayaVoblasts: "Витебская",
+    Minsk: "Минск",
+    Brest: "Брестская",
+  };
+
+  function mapKeyToRu(name) {
+    var t = normLabel(name);
+    if (!t) return t;
+    if (MAP_KEY_RU[t]) return MAP_KEY_RU[t];
+    var compact = t.replace(/\s+/g, "");
+    if (MAP_KEY_RU[compact]) return MAP_KEY_RU[compact];
+    return t;
+  }
+
+  function takeMoney(text) {
+    var m = String(text).match(
+      /-?\d{1,3}(?:\s\d{3})+(?:[.,]\d+)?(?:\s*руб\.?)?|-?\d+[.,]\d+\s*руб\.?/i
+    );
+    return m ? normLabel(m[0]) : null;
+  }
+
+  function takePercent(text) {
+    var m = String(text).match(/\d{1,3}(?:[.,]\d+)?\s*%/);
+    return m ? normLabel(m[0]) : null;
+  }
+
+  /**
+   * One painted label often is a single string:
+   * "Брестская 7 090,57 руб. 31,0%"
+   */
+  function regionFromBlob(line) {
+    var raw = normLabel(line);
+    if (!raw) return null;
+    var percent = takePercent(raw);
+    var amount = takeMoney(raw);
+    var name = raw;
+    if (percent) name = name.replace(percent, " ");
+    if (amount) name = name.replace(amount, " ");
+    name = mapKeyToRu(normLabel(name).replace(/руб\.?/gi, ""));
+    if (!name || !isRegionName(name) && !MAP_KEY_RU[normLabel(line).split(" ")[0]]) {
+      if (!(percent || amount) || !name) return null;
+    }
+    if (!isRegionName(name) && !/[А-Яа-яЁё]/.test(name)) return null;
+    return {
+      name: name,
+      amount: amount,
+      percent: percent,
+      value: amount || percent,
+    };
+  }
+
   /**
    * Map overlay texts in paint order: Name, "7 090,57 руб.", "31,0%", next name...
+   * Also a single combined line per region.
    */
   function pairRegionLabels(lines) {
     var regions = [];
@@ -315,7 +381,13 @@
       cur = null;
     }
     (lines || []).forEach(function (line) {
-      var t = normLabel(line);
+      var blob = regionFromBlob(line);
+      if (blob && blob.amount && blob.percent) {
+        flush();
+        regions.push(blob);
+        return;
+      }
+      var t = mapKeyToRu(normLabel(line));
       if (!t) return;
       if (isRegionName(t)) {
         flush();
@@ -341,6 +413,8 @@
     parseExportJson: parseExportJson,
     parsePivotViewerData: parsePivotViewerData,
     pairRegionLabels: pairRegionLabels,
+    mapKeyToRu: mapKeyToRu,
+    regionFromBlob: regionFromBlob,
     isChromeLabel: isChromeLabel,
   };
 

@@ -62,6 +62,12 @@ ok(brest, "brest label");
 ok(brest.percent === "31,0%", "brest 31 " + JSON.stringify(brest));
 ok(brest.amount === "7 090,57 руб.", "brest money");
 
+var blob = mod.regionFromBlob("Брестская 7 090,57 руб. 31,0%");
+ok(blob && blob.name === "Брестская", "blob name " + JSON.stringify(blob));
+ok(blob.percent === "31,0%", "blob percent");
+ok(mod.mapKeyToRu("BY-BR") === "Брестская", "BY-BR");
+ok(mod.mapKeyToRu("GomelskayaVoblasts") === "Гомельская", "gomel");
+
 ok(mod.isChromeLabel("Close") === true, "Close is chrome");
 ok(mod.isChromeLabel("Брестская") === false, "region not chrome");
 

@@ -60,6 +60,8 @@ def normalize_viewport(raw: Any) -> dict[str, Any]:
             out["text"] = el.get("text")
         if "checked" in el:
             out["checked"] = bool(el.get("checked"))
+        if el.get("group"):
+            out["group"] = el.get("group")
         if el.get("series") is not None:
             out["series"] = el.get("series")
         if el.get("filters") is not None:
@@ -92,6 +94,7 @@ def normalize_viewport(raw: Any) -> dict[str, Any]:
                 "value",
                 "text",
                 "checked",
+                "group",
                 "series",
                 "filters",
                 "capture",
@@ -255,9 +258,23 @@ def build_viewport_compare_text(pack: dict[str, Any] | None, *, max_rows: int = 
                     f"(pechat max {max_rows})"
                 )
         elif el.get("value") is not None or el.get("text") is not None:
-            lines.append(f"      value={el.get('value')!r} text={el.get('text')!r}")
+            extra = ""
+            if el.get("checked") is not None:
+                extra += f" checked={el.get('checked')}"
+            if el.get("group"):
+                extra += f" group={el.get('group')!r}"
+            lines.append(
+                f"      value={el.get('value')!r} text={el.get('text')!r}{extra}"
+            )
         elif el.get("checked") is not None:
-            lines.append(f"      checked={el.get('checked')}")
+            bits = []
+            if el.get("text") is not None:
+                bits.append(f"text={el.get('text')!r}")
+            if el.get("checked") is not None:
+                bits.append(f"checked={el.get('checked')}")
+            if el.get("group"):
+                bits.append(f"group={el.get('group')!r}")
+            lines.append("      " + " ".join(bits))
         elif el.get("series") is not None:
             lines.append(
                 f"      series={json.dumps(json_safe(el.get('series')), ensure_ascii=False)[:500]}"

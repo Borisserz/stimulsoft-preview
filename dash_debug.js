@@ -1328,29 +1328,43 @@
   function regionsFromCache(parsed) {
     if (!parsed || !parsed.rows || !parsed.rows.length) return [];
     var cols = parsed.columns || [];
+    var ru = window.dashExportJson && window.dashExportJson.mapKeyToRu;
     return parsed.rows
       .map(function (row) {
         var name = null;
+        var keyName = null;
         var amount = null;
         var percent = null;
         cols.forEach(function (c) {
           var v = row[c];
           if (v == null || v === "") return;
           var s = String(v).replace(/\s+/g, " ").trim();
+          if (s === "[object Object]") return;
           var ck = String(c).toLowerCase();
-          if (!name && /name|имя|регион|область|key/.test(ck) && /[A-Za-zА-Яа-яЁё]/.test(s))
-            name = s;
-          else if (!percent && /%|дол|share|percent/.test(ck)) percent = s;
-          else if (!amount && /value|факт|сумм|amount|знач/.test(ck)) amount = s;
+          var isNum = /^-?\d[\d\s.,]*%?$/.test(s.replace(/\s/g, " ").trim()) ||
+            /^-?\d[\d\s]*([.,]\d+)?$/.test(s.replace(/\s/g, ""));
+          if (/%/.test(s) || /%|дол|share|percent/.test(ck)) {
+            if (!percent) percent = s;
+            return;
+          }
+          if (isNum || /value|факт|сумм|amount|знач|sum/.test(ck)) {
+            if (isNum && !amount) amount = s;
+            return;
+          }
+          if (/[A-Za-zА-Яа-яЁё]/.test(s)) {
+            var named = ru ? ru(s) : s;
+            if (/[А-Яа-яЁё]/.test(named)) name = named;
+            else if (!keyName) keyName = named;
+          }
         });
-        if (!name) {
-          cols.forEach(function (c) {
-            var s = String(row[c] == null ? "" : row[c]).trim();
-            if (!name && /[A-Za-zА-Яа-яЁё]/.test(s) && !/^\d/.test(s)) name = s;
-          });
-        }
-        if (!name) return null;
-        return { name: name, amount: amount, percent: percent, value: amount || percent };
+        var finalName = name || (ru && keyName ? ru(keyName) : keyName);
+        if (!finalName) return null;
+        return {
+          name: finalName,
+          amount: amount,
+          percent: percent,
+          value: amount || percent,
+        };
       })
       .filter(function (r) {
         return r && r.name;
@@ -1360,13 +1374,15 @@
   function mergeMapRegions(painted, cached) {
     var by = {};
     var order = [];
+    var ru = window.dashExportJson && window.dashExportJson.mapKeyToRu;
     function take(r) {
       if (!r || !r.name) return;
-      if (!by[r.name]) {
-        by[r.name] = { name: r.name, amount: null, percent: null, value: null };
-        order.push(r.name);
+      var name = ru ? ru(r.name) : r.name;
+      if (!by[name]) {
+        by[name] = { name: name, amount: null, percent: null, value: null };
+        order.push(name);
       }
-      var dst = by[r.name];
+      var dst = by[name];
       if (r.amount && !dst.amount) dst.amount = r.amount;
       if (r.percent && !dst.percent) dst.percent = r.percent;
       if (r.value && !dst.value) dst.value = r.value;
@@ -1503,27 +1519,39 @@
     var seen = {};
     function pushLine(t) {
       t = String(t || "").replace(/\s+/g, " ").trim();
-      if (!t || t.length > 80 || seen[t]) return;
+      if (!t || t.length > 160 || seen[t]) return;
       seen[t] = true;
       lines.push(t);
     }
-    var nodes = domEl.getElementsByTagName("*");
-    for (var i = 0; i < nodes.length; i++) {
-      var node = nodes[i];
-      var tag = (node.tagName || "").toLowerCase();
-      if (
-        tag !== "text" &&
-        tag !== "tspan" &&
-        tag !== "title" &&
-        tag !== "div" &&
-        tag !== "span"
-      ) {
-        continue;
+    function walkRoot(root) {
+      if (!root || !root.getElementsByTagName) return;
+      try {
+        pushLine(root.innerText || root.textContent);
+      } catch (e0) {}
+      var nodes = root.getElementsByTagName("*");
+      for (var i = 0; i < nodes.length; i++) {
+        var node = nodes[i];
+        var tag = (node.tagName || "").toLowerCase();
+        if (tag === "iframe") {
+          try {
+            var doc = node.contentDocument;
+            if (doc && doc.body) walkRoot(doc.body);
+          } catch (e1) {}
+          continue;
+        }
+        if (
+          tag !== "text" &&
+          tag !== "tspan" &&
+          tag !== "title" &&
+          tag !== "div" &&
+          tag !== "span"
+        ) {
+          continue;
+        }
+        pushLine(node.textContent);
       }
-      var childEls = node.children || [];
-      if (childEls.length) continue;
-      pushLine(node.textContent);
     }
+    walkRoot(domEl);
     var regions = api.pairRegionLabels(lines);
     // Attach elementvalue when the geom's argument matches a region name
     if (regions.length) {
@@ -1600,6 +1628,14 @@
       if (ca.series !== undefined) out.series = safeClone(ca.series);
       if (attrs.isChecked !== undefined) out.checked = !!attrs.isChecked;
       if (ca.isChecked !== undefined) out.checked = !!ca.isChecked;
+      var comp = domEl.element;
+      if (comp && typeof comp === "object") {
+        if (comp.text && out.text == null) out.text = String(comp.text);
+        if (comp.checked !== undefined) out.checked = !!comp.checked;
+        if (comp.group) out.group = String(comp.group);
+      }
+      if (attrs.group && !out.group) out.group = String(attrs.group);
+      if (ca.group && !out.group) out.group = String(ca.group);
       // Short label only — not a full table dump
       var vt = visibleText(domEl, 160);
       if (vt && out.text == null && out.value == null) out.text = vt;
