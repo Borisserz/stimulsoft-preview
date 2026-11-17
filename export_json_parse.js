@@ -425,6 +425,197 @@
    * Map overlay texts in paint order: Name, "7 090,57 руб.", "31,0%", next name...
    * Also a single combined line per region.
    */
+  function isTotalWord(s) {
+    var t = normLabel(s).toLowerCase();
+    return t === "итог" || t === "итого" || t === "total" || t === "всего";
+  }
+
+  function isZeroNum(s) {
+    if (!(looksNumericLabel(s) || isPercentLabel(s))) return false;
+    var t = normLabel(s)
+      .replace(/\s/g, "")
+      .replace(/%/g, "")
+      .replace(/руб\.?/gi, "")
+      .replace(",", ".");
+    return /^0+(\.0+)?$/.test(t);
+  }
+
+  function expandCells(row) {
+    var out = [];
+    if (!Array.isArray(row)) return out;
+    for (var i = 0; i < row.length; i++) {
+      var cell = row[i];
+      var text = "";
+      var span = 1;
+      if (cell != null && typeof cell === "object" && !Array.isArray(cell)) {
+        text = cell.text != null ? cell.text : cell.value != null ? cell.value : "";
+        span = Number(cell.colspan || cell.colSpan || 1);
+      } else {
+        text = cell == null ? "" : String(cell);
+      }
+      if (!isFinite(span) || span < 1) span = 1;
+      if (span > 32) span = 32;
+      var label = normLabel(text);
+      for (var s = 0; s < span; s++) out.push(label);
+    }
+    return out;
+  }
+
+  function countNums(cells) {
+    var n = 0;
+    for (var i = 0; i < cells.length; i++) {
+      if (looksNumericLabel(cells[i]) || isPercentLabel(cells[i])) n++;
+    }
+    return n;
+  }
+
+  /**
+   * Painted Stimulsoft pivot: header rows (colspan groups) + body.
+   * Close/toolbar cells are dropped. Amounts stay inside one cell.
+   */
+  function parseHtmlGrid(rows) {
+    if (!Array.isArray(rows) || rows.length < 2) return null;
+    var expanded = [];
+    for (var i = 0; i < rows.length; i++) {
+      var exp = expandCells(rows[i]);
+      if (!exp.length) continue;
+      var onlyChrome = true;
+      for (var e = 0; e < exp.length; e++) {
+        if (exp[e] && !isChromeLabel(exp[e])) {
+          onlyChrome = false;
+          break;
+        }
+      }
+      if (onlyChrome) continue;
+      expanded.push(exp);
+    }
+    if (expanded.length < 2) return null;
+    var headerEnd = 0;
+    for (; headerEnd < expanded.length; headerEnd++) {
+      if (countNums(expanded[headerEnd]) >= 1) break;
+    }
+    if (headerEnd === 0 || headerEnd >= expanded.length) return null;
+    var width = 0;
+    for (var w = 0; w < expanded.length; w++) {
+      if (expanded[w].length > width) width = expanded[w].length;
+    }
+    var names = [];
+    for (var c = 0; c < width; c++) {
+      var parts = [];
+      for (var hr = 0; hr < headerEnd; hr++) {
+        var t = expanded[hr][c] || "";
+        if (!t || isChromeLabel(t) || looksNumericLabel(t)) continue;
+        if (parts.indexOf(t) < 0) parts.push(t);
+      }
+      names.push(parts.join(" / ") || "c" + c);
+    }
+    var keep = [];
+    var keptNames = [];
+    for (var k = 0; k < names.length; k++) {
+      if (!names[k] || isChromeLabel(names[k])) continue;
+      keep.push(k);
+      keptNames.push(names[k]);
+    }
+    if (!keptNames.length) return null;
+    var columns = uniqueNames(keptNames);
+    var outRows = [];
+    for (var r = headerEnd; r < expanded.length; r++) {
+      var obj = {};
+      var any = false;
+      for (var j = 0; j < keep.length; j++) {
+        var val = expanded[r][keep[j]] || "";
+        obj[columns[j]] = val;
+        if (val) any = true;
+      }
+      if (any) outRows.push(obj);
+    }
+    if (!outRows.length) return null;
+    return {
+      columns: columns,
+      rows: outRows,
+      row_count: outRows.length,
+      capture: "html_grid",
+    };
+  }
+
+  /** Non-zero painted numbers. Total/Итог with 0,0 scores 0. */
+  function pivotDataScore(parsed) {
+    if (!parsed || !Array.isArray(parsed.rows)) return 0;
+    var score = 0;
+    for (var i = 0; i < parsed.rows.length; i++) {
+      var row = parsed.rows[i];
+      if (!row || typeof row !== "object") continue;
+      var nonzero = 0;
+      var label = false;
+      var keys = Object.keys(row);
+      for (var k = 0; k < keys.length; k++) {
+        var v = row[keys[k]];
+        if (looksNumericLabel(v) || isPercentLabel(v)) {
+          if (!isZeroNum(v)) nonzero++;
+        } else if (v && !isTotalWord(v) && !isChromeLabel(v)) {
+          label = true;
+        }
+      }
+      if (nonzero > 0) score += 10 + nonzero;
+      else if (label) score += 1;
+    }
+    return score;
+  }
+
+  function pickPivotSource(list) {
+    var rank = {
+      pivot_viewer: 3,
+      data_cache: 2,
+      export_json: 2,
+      html_grid: 1,
+    };
+    var best = null;
+    var bestScore = -1;
+    var bestRank = -1;
+    (list || []).forEach(function (p) {
+      if (!p || !p.row_count) return;
+      var sc = pivotDataScore(p);
+      var rk = rank[p.capture] || 0;
+      if (!best || sc > bestScore || (sc === bestScore && rk > bestRank)) {
+        best = p;
+        bestScore = sc;
+        bestRank = rk;
+      }
+    });
+    return best;
+  }
+
+  /**
+   * Attrs (selected SVG) overwrite. Labels fill regions whose elementvalue is empty.
+   */
+  function mergeRegionLists(fromAttrs, fromLabels) {
+    var by = {};
+    var order = [];
+    function take(r, overwrite) {
+      if (!r || !r.name) return;
+      var name = mapKeyToRu(r.name);
+      if (!name) return;
+      if (!by[name]) {
+        by[name] = { name: name, amount: null, percent: null, value: null };
+        order.push(name);
+      }
+      var dst = by[name];
+      if (r.amount && (overwrite || !dst.amount)) dst.amount = r.amount;
+      if (r.percent && (overwrite || !dst.percent)) dst.percent = r.percent;
+      if (r.value && (overwrite || !dst.value)) dst.value = r.value;
+      if (!dst.value) dst.value = dst.amount || dst.percent || null;
+    }
+    (fromLabels || []).forEach(function (r) {
+      take(r, false);
+    });
+    (fromAttrs || []).forEach(function (r) {
+      take(r, true);
+    });
+    return order.map(function (n) {
+      return by[n];
+    });
+  }
+
   function pairRegionLabels(lines) {
     var regions = [];
     var cur = null;
@@ -464,6 +655,10 @@
     decodeExportData: decodeExportData,
     parseExportJson: parseExportJson,
     parsePivotViewerData: parsePivotViewerData,
+    parseHtmlGrid: parseHtmlGrid,
+    pivotDataScore: pivotDataScore,
+    pickPivotSource: pickPivotSource,
+    mergeRegionLists: mergeRegionLists,
     pairRegionLabels: pairRegionLabels,
     mapKeyToRu: mapKeyToRu,
     regionFromBlob: regionFromBlob,

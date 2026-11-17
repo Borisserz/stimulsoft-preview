@@ -1077,6 +1077,67 @@
     return out;
   }
 
+  function findDomByName(name) {
+    try {
+      var nodes = document.getElementsByTagName("*");
+      for (var i = 0; i < nodes.length; i++) {
+        var attrs = nodes[i].elementAttributes;
+        if (attrs && String(attrs.name) === String(name)) return nodes[i];
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function tableToMatrix(table) {
+    var rows = [];
+    if (!table || !table.rows) return rows;
+    for (var r = 0; r < table.rows.length; r++) {
+      var cells = table.rows[r].cells;
+      if (!cells || !cells.length) continue;
+      var row = [];
+      for (var c = 0; c < cells.length; c++) {
+        row.push({
+          text: htmlCellText(cells[c]),
+          colspan: cells[c].colSpan || 1,
+        });
+      }
+      rows.push(row);
+    }
+    return rows;
+  }
+
+  /** Painted pivot tables. Used when getViewerData is only Total/Итог = 0,0. */
+  function capturePivotHtml(domEl) {
+    var api = window.dashExportJson;
+    if (!domEl || !api || typeof api.parseHtmlGrid !== "function") return null;
+    var tables = domEl.getElementsByTagName("table");
+    var chunks = [];
+    var best = null;
+    var bestScore = -1;
+    function consider(parsed) {
+      if (!parsed || !parsed.row_count) return;
+      parsed.capture = "html_grid";
+      var sc = api.pivotDataScore(parsed);
+      if (sc > bestScore) {
+        best = parsed;
+        bestScore = sc;
+      }
+    }
+    for (var i = 0; i < tables.length; i++) {
+      if (tables[i].getElementsByTagName("table").length > 0) continue;
+      var matrix = tableToMatrix(tables[i]);
+      if (!matrix.length) continue;
+      chunks.push(matrix);
+      consider(api.parseHtmlGrid(matrix));
+    }
+    if (chunks.length > 1) {
+      var all = [];
+      for (var c = 0; c < chunks.length; c++) all = all.concat(chunks[c]);
+      consider(api.parseHtmlGrid(all));
+    }
+    return bestScore > 0 ? best : null;
+  }
+
   function resolveTableComponent(name) {
     // 1) painted DOM often keeps live .element
     try {
@@ -1277,6 +1338,14 @@
     return new Promise(function (resolve) {
       var component = resolveTableComponent(name);
       if (!component) {
+        var htmlFallback =
+          elType === "StiPivotTableElement"
+            ? capturePivotHtml(findDomByName(name))
+            : null;
+        if (htmlFallback && htmlFallback.row_count) {
+          resolve({ parsed: htmlFallback, reason: "pick=html_grid no_component" });
+          return;
+        }
         resolve({
           parsed: null,
           reason:
@@ -1288,18 +1357,63 @@
         return;
       }
       var isPivot = elType === "StiPivotTableElement";
-      var first = isPivot
-        ? loadPivotViewerData(component)
-        : loadTableFromDataCache(component);
+      if (isPivot) {
+        var htmlParsed = capturePivotHtml(findDomByName(name));
+        loadPivotViewerData(component).then(function (viewer) {
+          var api = window.dashExportJson;
+          var viewerScore =
+            api && api.pivotDataScore ? api.pivotDataScore(viewer && viewer.parsed) : 0;
+          function finish(more) {
+            var list = [viewer && viewer.parsed].concat(more || []);
+            if (viewerScore < 20 && htmlParsed) list.push(htmlParsed);
+            var best =
+              api && api.pickPivotSource
+                ? api.pickPivotSource(list)
+                : viewer && viewer.parsed;
+            if (!best || !best.row_count) {
+              resolve({
+                parsed: null,
+                reason: (viewer && viewer.reason) || "pivot_empty",
+              });
+              return;
+            }
+            var score = api && api.pivotDataScore ? api.pivotDataScore(best) : 0;
+            resolve({
+              parsed: best,
+              reason:
+                "pick=" +
+                (best.capture || "?") +
+                " score=" +
+                score +
+                " viewer=" +
+                ((viewer && viewer.reason) || "-"),
+            });
+          }
+          if (viewerScore >= 20) {
+            finish([]);
+            return;
+          }
+          loadTableFromDataCache(component).then(function (cache) {
+            var cacheScore =
+              api && api.pivotDataScore ? api.pivotDataScore(cache && cache.parsed) : 0;
+            if (cacheScore >= 20) {
+              finish([cache && cache.parsed]);
+              return;
+            }
+            exportTableJsonAsync(component).then(function (json) {
+              finish([cache && cache.parsed, json && json.parsed]);
+            });
+          });
+        });
+        return;
+      }
+      var first = loadTableFromDataCache(component);
       first.then(function (fromFirst) {
         if (fromFirst.parsed && fromFirst.parsed.row_count) {
           resolve(fromFirst);
           return;
         }
-        // Pivot: also try raw data cache as secondary
-        var second = isPivot
-          ? loadTableFromDataCache(component)
-          : Promise.resolve({ parsed: null, reason: "skip" });
+        var second = Promise.resolve({ parsed: null, reason: "skip" });
         second.then(function (fromSecond) {
           if (fromSecond.parsed && fromSecond.parsed.row_count) {
             resolve(fromSecond);
@@ -1526,9 +1640,7 @@
     var fromAttrs = [];
     function walkRoot(root) {
       if (!root || !root.getElementsByTagName) return;
-      try {
-        pushLine(root.innerText || root.textContent);
-      } catch (e0) {}
+      // Do not dump the whole map as one line — it hides the other regions.
       var nodes = root.getElementsByTagName("*");
       for (var i = 0; i < nodes.length; i++) {
         var node = nodes[i];
@@ -1546,7 +1658,23 @@
             node.getAttribute("elementident");
           var val = node.getAttribute("elementvalue");
           if (arg && api.regionFromAttrs) {
-            var hit = api.regionFromAttrs(arg, val || node.textContent || "");
+            var groupText = "";
+            if (!val && node.parentNode) {
+              var kids = node.parentNode.childNodes || [];
+              var bits = [];
+              for (var g = 0; g < kids.length; g++) {
+                var kid = kids[g];
+                if (kid === node) continue;
+                var ktag = (kid.tagName || "").toLowerCase();
+                if (ktag === "path" || ktag === "g") continue;
+                var tx = String(kid.textContent || "")
+                  .replace(/\s+/g, " ")
+                  .trim();
+                if (tx && tx.length < 80) bits.push(tx);
+              }
+              groupText = bits.join(" ");
+            }
+            var hit = api.regionFromAttrs(arg, val || groupText || "");
             if (hit) fromAttrs.push(hit);
           }
         }
@@ -1566,26 +1694,11 @@
       }
     }
     walkRoot(domEl);
-    if (fromAttrs.length) {
-      var by = {};
-      var order = [];
-      fromAttrs.forEach(function (r) {
-        if (!r || !r.name) return;
-        if (!by[r.name]) {
-          by[r.name] = r;
-          order.push(r.name);
-          return;
-        }
-        var dst = by[r.name];
-        if (r.amount && !dst.amount) dst.amount = r.amount;
-        if (r.percent && !dst.percent) dst.percent = r.percent;
-        if (r.value && !dst.value) dst.value = r.value;
-      });
-      return order.map(function (n) {
-        return by[n];
-      });
+    var labeled = api.pairRegionLabels(lines);
+    if (typeof api.mergeRegionLists === "function") {
+      return api.mergeRegionLists(fromAttrs, labeled);
     }
-    return api.pairRegionLabels(lines);
+    return fromAttrs.length ? fromAttrs : labeled;
   }
 
   function visibleText(el, maxLen) {

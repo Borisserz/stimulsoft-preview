@@ -102,6 +102,78 @@ var wide = mod.parsePivotViewerData(swollen);
 ok(wide && wide.row_count === 3, "kept data rows " + (wide && wide.row_count));
 ok(wide.rows[0]["Наименование"] === "НДС", "first data is НДС");
 
+// Drilled pivot: getViewerData is only Total/Итог zeros.
+// Painted table has the payment rows (Brest 722 087,2 / Pinsk 7 220,9).
+var stub = mod.parsePivotViewerData({
+  headerHeight: 2,
+  headerWidth: 2,
+  cells: [
+    [{ text: "Сводная таблица" }, { text: "Наименование платежа" }, { text: "" }, { text: "Итог" }],
+    [{ text: "Сводная таблица" }, { text: "ИМНС" }, { text: "Total" }, { text: "Итог" }],
+    [{ text: "Вид бюджета" }, { text: "Факт (руб.)" }, { text: "0,0" }, { text: "0,0" }],
+    [{ text: "Вид бюджета" }, { text: "План (руб.)" }, { text: "0,0" }, { text: "0,0" }],
+  ],
+});
+ok(stub && stub.row_count === 2, "stub still parses");
+ok(mod.pivotDataScore(stub) === 0, "zero totals score 0, got " + mod.pivotDataScore(stub));
+
+var painted = [
+  [
+    { text: "Сводная таблица", colspan: 2 },
+    { text: "Консолидированный", colspan: 2 },
+    { text: "Close", colspan: 1 },
+  ],
+  ["Наименование платежа", "ИМНС", "Факт (руб.)", "План (руб.)", "Close"],
+  ["Единый налог с ИП", "", "29 370,1", "168", ""],
+  ["Акцизы на спирт", "", "142 218,4", "56", ""],
+  ["Итог", "", "722 087,2", "979", ""],
+];
+var html = mod.parseHtmlGrid(painted);
+ok(html && html.capture === "html_grid", "html tag");
+ok(html.row_count === 3, "3 painted rows " + (html && html.row_count));
+ok(html.columns.indexOf("Close") < 0, "no Close column " + (html && html.columns));
+var factKey = html.columns.filter(function (c) {
+  return c.indexOf("Факт") >= 0;
+})[0];
+ok(factKey, "fact column " + html.columns);
+ok(html.rows[0][factKey] === "29 370,1", "brest first fact " + JSON.stringify(html.rows[0]));
+ok(html.rows[2][factKey] === "722 087,2", "brest total " + html.rows[2][factKey]);
+ok(mod.pivotDataScore(html) > 20, "painted score " + mod.pivotDataScore(html));
+
+var pinsk = mod.parseHtmlGrid([
+  ["Наименование платежа", "Управление/отдел", "Факт (руб.)", "План (руб.)"],
+  ["Земельный налог", "", "1 027,2", "2 881,7"],
+  ["Итог", "", "7 220,9", "9 787,2"],
+]);
+ok(pinsk && pinsk.row_count === 2, "pinsk rows " + (pinsk && pinsk.row_count));
+ok(pinsk.rows[0]["Факт (руб.)"] === "1 027,2", "pinsk fact");
+ok(pinsk.rows[1]["Факт (руб.)"] === "7 220,9", "pinsk total fact");
+
+var picked = mod.pickPivotSource([stub, html]);
+ok(picked && picked.capture === "html_grid", "painted beats zero stub");
+ok(picked.rows[2][factKey] === "722 087,2", "picked keeps 722 087,2");
+
+var merged = mod.mergeRegionLists(
+  [
+    { name: "Брестская", amount: "7 099,31 руб.", percent: "31,0 %", value: "7 099,31 руб." },
+    { name: "Гомельская", amount: null, percent: null, value: null },
+    { name: "Витебская", amount: null, percent: null, value: null },
+  ],
+  [
+    { name: "Гомельская", amount: "12 000 руб.", percent: "18,2%", value: "12 000 руб." },
+    { name: "Витебская", amount: null, percent: "9,1%", value: "9,1%" },
+    { name: "Минск", amount: "23 414,38 руб.", percent: "33,3%", value: "23 414,38 руб." },
+  ]
+);
+function regionNamed(list, name) {
+  for (var i = 0; i < list.length; i++) if (list[i].name === name) return list[i];
+  return null;
+}
+ok(regionNamed(merged, "Брестская").percent === "31,0 %", "brest kept");
+ok(regionNamed(merged, "Гомельская").percent === "18,2%", "gomel from labels " + JSON.stringify(merged));
+ok(regionNamed(merged, "Витебская").percent === "9,1%", "vitebsk from labels");
+ok(regionNamed(merged, "Минск").percent === "33,3%", "minsk from labels");
+
 ok(mod.mapKeyToRu("BY-BR") === "Брестская", "BY-BR");
 ok(mod.mapKeyToRu("GomelskayaVoblasts") === "Гомельская", "gomel");
 

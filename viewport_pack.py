@@ -164,7 +164,8 @@ def build_viewport_compare_text(pack: dict[str, Any] | None, *, max_rows: int = 
     lines.append("========== SVERKA S FRONTOM ==========")
     lines.append("Istochnik=VIEWPORT (knopki/KPI/karta) + table data_cache/export.")
     lines.append("NE SQL-snyamka. NE verify-zhurnal.")
-    lines.append("Horosho: capture=pivot_viewer / data_cache / export_json + cifry.")
+    lines.append("Horosho: pivot_viewer / data_cache / export_json / html_grid + cifry.")
+    lines.append("html_grid = zhivaya tablica, esli pivot_viewer otdal tolko Itog 0,0.")
     lines.append("Ploho: html_sti + kolonka Close — eto knopka UI, ne dannye.")
     lines.append("")
 
