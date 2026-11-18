@@ -39,6 +39,25 @@ ok(parsed.columns.indexOf("Доля") >= 0, "share column");
 ok(parsed.rows[0]["Регион"] === "Брестская", "brest row " + JSON.stringify(parsed.rows[0]));
 ok(parsed.rows[0]["Факт (руб.)"] === "7 090,57", "brest amount");
 ok(parsed.rows[0]["Доля"] === "31,0%", "brest percent");
+
+function asList(items) {
+  var list = { length: items.length };
+  for (var i = 0; i < items.length; i++) list[i] = items[i];
+  return list;
+}
+var likeData = {
+  headerHeight: 1,
+  headerWidth: 2,
+  cells: asList([
+    asList(viewerData.cells[0]),
+    asList(viewerData.cells[1]),
+    asList(viewerData.cells[2]),
+    asList(viewerData.cells[3]),
+  ]),
+};
+var likeParsed = mod.parsePivotViewerData(likeData);
+ok(likeParsed && likeParsed.row_count === 2, "array-like cells " + (likeParsed && likeParsed.row_count));
+ok(likeParsed.rows[0]["Факт (руб.)"] === "7 090,57", "array-like amount");
 // Must NOT smash a data row into a column name
 parsed.columns.forEach(function (c) {
   if (String(c).indexOf("7 090") >= 0) fail("amount leaked into column name: " + c);

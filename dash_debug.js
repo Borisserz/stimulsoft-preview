@@ -505,6 +505,22 @@
       var attrs = nodes[i].elementAttributes;
       if (!attrs || !attrs.type) continue;
       var type = String(attrs.type);
+      if (type.indexOf("Text") >= 0) {
+        var filterText = "";
+        try {
+          filterText = nodes[i].element && nodes[i].element.text ? String(nodes[i].element.text) : "";
+        } catch (e1) {}
+        if (!filterText) filterText = String(nodes[i].innerText || "");
+        filterText = filterText.replace(/\s+/g, " ").trim();
+        if (
+          filterText &&
+          filterText.length < 60 &&
+          /област|имнс|пинск/i.test(filterText)
+        ) {
+          bits.push("f=" + filterText);
+        }
+        continue;
+      }
       if (type.indexOf("Cards") < 0 && type.indexOf("Indicator") < 0 && type.indexOf("Map") < 0)
         continue;
       var comp = nodes[i].element;
@@ -1758,23 +1774,68 @@
     return parsed;
   }
 
-  /** Sync: contentAttributes.cells from Stimulsoft pivot paint, if present. */
+  /** The grid showData() paints lives on contentAttributes.data, not getViewerData. */
+  function pivotViewerPack(source) {
+    if (!source || typeof source !== "object") return null;
+    var data = source.data && source.data.cells ? source.data : source;
+    if (!data || !data.cells) return null;
+    return {
+      cells: data.cells,
+      headerHeight: data.headerHeight,
+      headerWidth: data.headerWidth,
+    };
+  }
+
+  function pivotScore(parsed) {
+    var api = window.dashExportJson;
+    if (!parsed || !parsed.row_count) return 0;
+    return api && api.pivotDataScore ? api.pivotDataScore(parsed) : parsed.row_count;
+  }
+
+  /** Sync: painted pivot model. getViewerData is often only Total/Итог = 0,0. */
   function capturePivotElementSync(domEl, ca) {
     var attrs = (domEl && domEl.elementAttributes) || {};
     ca = ca || attrs.contentAttributes || {};
     var title = stiResolveTitle(domEl, attrs);
-    if (ca.cells && Array.isArray(ca.cells)) {
-      var fromCa = capturePivotFromViewerData(
-        {
-          cells: ca.cells,
-          headerHeight: ca.headerHeight,
-          headerWidth: ca.headerWidth,
-        },
-        title
-      );
-      if (fromCa) return fromCa;
+    var packs = [pivotViewerPack(ca), pivotViewerPack(ca.data)];
+    var best = null;
+    var bestScore = 0;
+    for (var i = 0; i < packs.length; i++) {
+      if (!packs[i]) continue;
+      var parsed = capturePivotFromViewerData(packs[i], title);
+      var sc = pivotScore(parsed);
+      if (parsed && sc >= 10 && sc > bestScore) {
+        best = parsed;
+        bestScore = sc;
+      }
     }
-    return null;
+    return best;
+  }
+
+  /** PivotTable widget stores the painted cells on its .data after showData. */
+  function pivotModelFromDom(domEl) {
+    if (!domEl || !domEl.getElementsByTagName) return null;
+    var best = null;
+    var bestScore = 0;
+    function consider(node) {
+      if (!node || node.id === "dash-debug-panel") return;
+      var pack = pivotViewerPack(node.data) || pivotViewerPack(node);
+      var attrs = node.elementAttributes;
+      if (!pack && attrs && attrs.contentAttributes) {
+        pack = pivotViewerPack(attrs.contentAttributes);
+      }
+      if (!pack) return;
+      var parsed = capturePivotFromViewerData(pack, null);
+      var sc = pivotScore(parsed);
+      if (parsed && sc >= 10 && sc > bestScore) {
+        best = parsed;
+        bestScore = sc;
+      }
+    }
+    consider(domEl);
+    var nodes = domEl.getElementsByTagName("*");
+    for (var i = 0; i < nodes.length; i++) consider(nodes[i]);
+    return best;
   }
 
   // sync path used inside snapshotElement; enrich fills pivot/table async later
@@ -1881,15 +1942,44 @@
     return out;
   }
 
+  function domIsShown(node) {
+    if (!node || !node.getClientRects) return false;
+    var rects = node.getClientRects();
+    if (!rects || !rects.length) return false;
+    return rects[0].width > 2 && rects[0].height > 2;
+  }
+
   function findDomByName(name) {
+    var matches = [];
     try {
-      var nodes = document.getElementsByTagName("*");
-      for (var i = 0; i < nodes.length; i++) {
-        var attrs = nodes[i].elementAttributes;
-        if (attrs && String(attrs.name) === String(name)) return nodes[i];
+      var docs = atlasDocs();
+      for (var d = 0; d < docs.length; d++) {
+        var nodes = docs[d].getElementsByTagName("*");
+        for (var i = 0; i < nodes.length; i++) {
+          var attrs = nodes[i].elementAttributes;
+          if (attrs && String(attrs.name) === String(name)) matches.push(nodes[i]);
+        }
       }
     } catch (e) {}
-    return null;
+    if (!matches.length) return null;
+    var shown = [];
+    for (var s = 0; s < matches.length; s++) {
+      if (domIsShown(matches[s])) shown.push(matches[s]);
+    }
+    var pool = shown.length ? shown : matches;
+    var best = pool[0];
+    var bestScore = -1;
+    for (var p = 0; p < pool.length; p++) {
+      var sc = pivotScore(capturePivotHtml(pool[p]));
+      var model = pivotModelFromDom(pool[p]);
+      var modelScore = pivotScore(model);
+      if (modelScore > sc) sc = modelScore;
+      if (sc > bestScore) {
+        best = pool[p];
+        bestScore = sc;
+      }
+    }
+    return best;
   }
 
   function tableToMatrix(table) {
@@ -1975,17 +2065,12 @@
   }
 
   function resolveTableComponent(name) {
-    // 1) painted DOM often keeps live .element
+    // 1) the visible painted node, not a hidden copy of the same name
     try {
-      var nodes = document.getElementsByTagName("*");
-      for (var i = 0; i < nodes.length; i++) {
-        var domEl = nodes[i];
-        var attrs = domEl.elementAttributes;
-        if (!attrs || String(attrs.name) !== String(name)) continue;
-        if (domEl.element && typeof domEl.element === "object") {
-          if (domEl.element.report) rememberStiReport(domEl.element.report);
-          return domEl.element;
-        }
+      var domEl = findDomByName(name);
+      if (domEl && domEl.element && typeof domEl.element === "object") {
+        if (domEl.element.report) rememberStiReport(domEl.element.report);
+        return domEl.element;
       }
     } catch (e0) {}
     var report = resolveStiReport();
@@ -2179,10 +2264,16 @@
           elType === "StiPivotTableElement" ? capturePivotHtmlNear(missingDom) : null;
         var gridFallback =
           elType === "StiPivotTableElement" ? pivotGridCandidate(missingDom) : null;
+        var modelFallback =
+          elType === "StiPivotTableElement" ? pivotModelFromDom(missingDom) : null;
         var picked =
           window.dashExportJson && window.dashExportJson.pickPivotSource
-            ? window.dashExportJson.pickPivotSource([htmlFallback, gridFallback])
-            : htmlFallback || gridFallback;
+            ? window.dashExportJson.pickPivotSource([
+                htmlFallback,
+                gridFallback,
+                modelFallback,
+              ])
+            : htmlFallback || gridFallback || modelFallback;
         if (picked && picked.row_count) {
           resolve({
             parsed: picked,
@@ -2206,25 +2297,37 @@
           var api = window.dashExportJson;
           var viewerScore =
             api && api.pivotDataScore ? api.pivotDataScore(viewer && viewer.parsed) : 0;
-          function finish(more) {
+          function finish(more, attempt) {
             // Re-read painted DOM here — early capture is often empty right after drill.
+            attempt = attempt || 0;
             var dom = findDomByName(name);
             var htmlNow = capturePivotHtmlNear(dom);
             var gridNow = pivotGridCandidate(dom);
+            var modelNow = pivotModelFromDom(dom);
             var list = [].concat(more || []);
             if (viewerScore >= 10) list.push(viewer && viewer.parsed);
+            if (modelNow) list.push(modelNow);
             if (htmlNow) list.push(htmlNow);
             if (gridNow) list.push(gridNow);
             var best =
               api && api.pickPivotSource
                 ? api.pickPivotSource(list)
-                : htmlNow || (viewerScore >= 10 ? viewer && viewer.parsed : null);
+                : modelNow || htmlNow || (viewerScore >= 10 ? viewer && viewer.parsed : null);
+            if ((!best || !best.row_count) && attempt < 6) {
+              setTimeout(function () {
+                finish(more, attempt + 1);
+              }, 400);
+              return;
+            }
             if (!best || !best.row_count) {
               resolve({
                 parsed: null,
                 reason:
-                  (viewer && viewer.reason) ||
-                  "pivot_empty html=" + (htmlNow ? htmlNow.row_count : 0),
+                  ((viewer && viewer.reason) || "pivot_empty") +
+                  " html=" +
+                  (htmlNow ? htmlNow.row_count : 0) +
+                  " model=" +
+                  (modelNow ? modelNow.row_count : 0),
               });
               return;
             }

@@ -215,10 +215,23 @@
    *   c = e.cells[p][A] with p < headerWidth, A >= headerHeight).
    * headerWidth = row-header columns, headerHeight = column-header rows.
    */
+  function asArray(value) {
+    if (!value) return null;
+    if (Array.isArray(value)) return value;
+    if (typeof value.length !== "number" || value.length < 0) return null;
+    var out = [];
+    for (var i = 0; i < value.length; i++) out.push(value[i]);
+    return out;
+  }
+
   function parsePivotViewerData(viewerData) {
     if (!viewerData || typeof viewerData !== "object") return null;
-    var cells = viewerData.cells;
-    if (!Array.isArray(cells) || cells.length < 1) return null;
+    var cells = asArray(viewerData.cells);
+    if (!cells || cells.length < 1) return null;
+    for (var ci = 0; ci < cells.length; ci++) {
+      var column = asArray(cells[ci]);
+      if (column) cells[ci] = column;
+    }
     var headerHeight = Number(viewerData.headerHeight);
     var headerWidth = Number(viewerData.headerWidth);
     if (!isFinite(headerHeight) || headerHeight < 0) headerHeight = 0;
