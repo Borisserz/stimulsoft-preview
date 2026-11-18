@@ -472,6 +472,20 @@ ok(
   "pivot beats shifted html"
 );
 ok(mod.mapKeyToRu("GomelskayaVoblasts") === "Гомельская", "gomel");
+ok(mod.regionBlobMatches("BY-BR 7 099,31", /brest|брест|brestska/i), "code BY-BR is Brest");
+ok(mod.regionBlobMatches("BY-HO", /gomel|гомел/i), "code BY-HO is Gomel");
+ok(mod.regionBlobMatches("BY-VI", /viteb|витеб|vitseb/i), "code BY-VI is Vitebsk");
+ok(mod.regionBlobMatches("BY-HR", /grodn|гродн/i), "code BY-HR is Grodno");
+ok(mod.regionBlobMatches("BY-MA", /mogil|могил|mahil/i), "code BY-MA is Mogilev");
+ok(mod.regionBlobMatches("BY-MI", /минская|minskaya|минской/i), "code BY-MI is Minskaya");
+ok(
+  mod.regionBlobMatches("BY-HM", /минск|minsk/i, /минская|minskaya|минской/i),
+  "code BY-HM is Minsk city"
+);
+ok(
+  !mod.regionBlobMatches("BY-MI", /минск|minsk/i, /минская|minskaya|минской/i),
+  "Minsk city click skips Minskaya code"
+);
 
 ok(mod.isChromeLabel("Close") === true, "Close is chrome");
 ok(mod.isChromeLabel("Брестская") === false, "region not chrome");

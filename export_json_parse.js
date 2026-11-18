@@ -764,6 +764,27 @@
     return bestScore > 0 ? best : null;
   }
 
+  /** Match a map geom blob to an oblast regex, including ISO codes like BY-BR. */
+  function regionBlobMatches(blob, re, skipRe) {
+    var text = String(blob || "");
+    if (skipRe && skipRe.test(text)) return false;
+    var parts = text.split(/[^0-9A-Za-z\u0400-\u04FF\-]+/);
+    var mapped = [];
+    for (var i = 0; i < parts.length; i++) {
+      if (!parts[i] || parts[i].length < 2) continue;
+      var ru = mapKeyToRu(parts[i]);
+      if (ru && ru !== parts[i]) mapped.push(ru);
+    }
+    for (var s = 0; s < mapped.length; s++) {
+      if (skipRe && skipRe.test(mapped[s])) return false;
+    }
+    if (re && re.test(text)) return true;
+    for (var m = 0; m < mapped.length; m++) {
+      if (re && re.test(mapped[m])) return true;
+    }
+    return false;
+  }
+
   function firstLabelColumn(parsed) {
     if (!parsed || !parsed.columns || !parsed.columns.length) return null;
     return parsed.columns[0];
@@ -970,6 +991,7 @@
       data_cache: 2,
       export_json: 2,
       html_grid: 1,
+      data_grid: 2,
     };
     var best = null;
     var bestScore = -1;
@@ -1074,6 +1096,7 @@
     mergeRegionLists: mergeRegionLists,
     pairRegionLabels: pairRegionLabels,
     mapKeyToRu: mapKeyToRu,
+    regionBlobMatches: regionBlobMatches,
     regionFromBlob: regionFromBlob,
     regionFromAttrs: regionFromAttrs,
     isChromeLabel: isChromeLabel,

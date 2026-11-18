@@ -586,15 +586,12 @@
   function atlasNoteHit(el, via) {
     lastAtlasHit = {
       via: via || "none",
-      ident: el && el.getAttribute ? el.getAttribute("elementident") || "" : "",
-      argument: el && el.getAttribute ? el.getAttribute("elementargument") || "" : "",
-      value:
-        el && el.getAttribute
-          ? String(el.getAttribute("elementvalue") || "")
-              .replace(/\s+/g, " ")
-              .trim()
-              .slice(0, 48)
-          : "",
+      ident: atlasAttr(el, "elementident"),
+      argument: atlasAttr(el, "elementargument"),
+      value: String(atlasAttr(el, "elementvalue") || "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 48),
       onclick: !!(el && typeof el.onclick === "function"),
     };
   }
@@ -738,33 +735,60 @@
     return "";
   }
 
-  /** SVG shapes that carry Stimulsoft drill attributes. Not table text. */
+  function atlasAttr(n, name) {
+    if (!n) return "";
+    var v = "";
+    try {
+      if (n.getAttribute) v = n.getAttribute(name) || "";
+    } catch (e) {}
+    if (!v && n[name] != null && typeof n[name] !== "object") v = String(n[name]);
+    return v;
+  }
+
+  /** Any map node that carries a drill attribute. Not only path. Not table text. */
   function atlasMapGeoms() {
     var out = [];
-    var tags = ["path", "polygon", "circle", "ellipse", "rect"];
-    for (var t = 0; t < tags.length; t++) {
-      var nodes = document.getElementsByTagName(tags[t]);
-      for (var i = 0; i < nodes.length; i++) {
-        var n = nodes[i];
-        if (!n.getAttribute) continue;
-        var arg = n.getAttribute("elementargument") || "";
-        var ident = n.getAttribute("elementident") || "";
-        var value = n.getAttribute("elementvalue") || "";
-        if (!arg && !ident && !value) continue;
-        out.push(n);
-      }
+    var nodes = document.getElementsByTagName("*");
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i];
+      var arg = atlasAttr(n, "elementargument");
+      var ident = atlasAttr(n, "elementident");
+      var value = atlasAttr(n, "elementvalue");
+      if (!arg && !ident && !value) continue;
+      if (atlasHostType(n).indexOf("Map") < 0) continue;
+      out.push(n);
     }
     return out;
   }
 
   function atlasGeomBlob(n) {
-    if (!n || !n.getAttribute) return "";
+    if (!n) return "";
     return [
-      n.getAttribute("elementident") || "",
-      n.getAttribute("elementargument") || "",
-      n.getAttribute("elementvalue") || "",
-      n.getAttribute("interactiontooltip") || "",
+      atlasAttr(n, "elementident"),
+      atlasAttr(n, "elementargument"),
+      atlasAttr(n, "elementvalue"),
+      atlasAttr(n, "interactiontooltip"),
     ].join(" ");
+  }
+
+  function atlasBlobMatches(blob, re, skipRe) {
+    var api = window.dashExportJson;
+    if (api && typeof api.regionBlobMatches === "function") {
+      return api.regionBlobMatches(blob, re, skipRe);
+    }
+    if (skipRe && skipRe.test(blob)) return false;
+    return !!(re && re.test(blob));
+  }
+
+  function atlasMapLabelReady() {
+    var texts = document.querySelectorAll("text, tspan");
+    for (var i = 0; i < texts.length; i++) {
+      if (atlasHostType(texts[i]).indexOf("Map") < 0) continue;
+      var label = String(texts[i].textContent || "").replace(/\s+/g, " ").trim();
+      if (!label || label.length > 48) continue;
+      if (/брест|витеб|гомел|гродн|могил|минск|brest|gomel/i.test(label)) return true;
+    }
+    return false;
   }
 
   function atlasFireGeom(node, via) {
@@ -772,9 +796,9 @@
       atlasNoteHit(null, "none");
       return false;
     }
-    var ident = node.getAttribute && node.getAttribute("elementident");
-    var arg = node.getAttribute && node.getAttribute("elementargument");
-    if (!ident && arg) node.setAttribute("elementident", arg);
+    var ident = atlasAttr(node, "elementident");
+    var arg = atlasAttr(node, "elementargument");
+    if (!ident && arg && node.setAttribute) node.setAttribute("elementident", arg);
     if (typeof node.onclick === "function") {
       try {
         node.onclick.call(node);
@@ -786,23 +810,50 @@
     return atlasClick(node);
   }
 
-  /** Oblast / Minsk: only a map path, never the word in the table. */
+  /** Oblast / Minsk: a map geom (code BY-BR counts) or a map label. Never the table. */
   function atlasClickMapRegion(re, skipRe) {
     var best = null;
     var bestLen = 9999;
     var geoms = atlasMapGeoms();
     for (var i = 0; i < geoms.length; i++) {
       var n = geoms[i];
-      if (atlasHostType(n).indexOf("Map") < 0) continue;
       var blob = atlasGeomBlob(n);
-      if (skipRe && skipRe.test(blob)) continue;
-      if (!re.test(blob)) continue;
+      if (!atlasBlobMatches(blob, re, skipRe)) continue;
       if (blob.length < bestLen) {
         best = n;
         bestLen = blob.length;
       }
     }
-    return atlasFireGeom(best, "map-onclick");
+    if (best) return atlasFireGeom(best, "map-onclick");
+    var texts = document.querySelectorAll("text, tspan, title");
+    var textBest = null;
+    var textLen = 9999;
+    for (var t = 0; t < texts.length; t++) {
+      var node = texts[t];
+      if (atlasHostType(node).indexOf("Map") < 0) continue;
+      if (node.getElementsByTagName && node.getElementsByTagName("tspan").length) continue;
+      var label = String(node.textContent || "").replace(/\s+/g, " ").trim();
+      if (!label || label.length > 48) continue;
+      if (!atlasBlobMatches(label, re, skipRe)) continue;
+      if (label.length < textLen) {
+        textBest = node;
+        textLen = label.length;
+      }
+    }
+    if (textBest) {
+      var target = textBest;
+      var cur = textBest;
+      for (var up = 0; up < 8 && cur; up++) {
+        if (typeof cur.onclick === "function" && atlasHostType(cur).indexOf("Map") >= 0) {
+          target = cur;
+          break;
+        }
+        cur = cur.parentElement || cur.parentNode;
+      }
+      return atlasFireGeom(target, "map-text");
+    }
+    atlasNoteHit(geoms[0] || null, geoms.length ? "none-nomatch" : "none");
+    return false;
   }
 
   /**
@@ -1013,7 +1064,7 @@
       });
       chain = chain.then(function () {
         return atlasWaitUntil(function () {
-          return atlasMapGeoms().length > 0;
+          return atlasMapGeoms().length > 0 || atlasMapLabelReady();
         }, 5000);
       });
       chain = chain.then(function () {
@@ -1814,6 +1865,33 @@
     return parsed;
   }
 
+  /** Painted cells sometimes sit just outside the pivot node. */
+  function capturePivotHtmlNear(domEl) {
+    var local = capturePivotHtml(domEl);
+    if (local && local.row_count) return local;
+    var root = domEl;
+    for (var i = 0; i < 4 && root && root.parentElement; i++) {
+      root = root.parentElement;
+      if (root.id === "dash-debug-panel") break;
+      var wider = capturePivotHtml(root);
+      if (wider && wider.row_count) return wider;
+    }
+    return null;
+  }
+
+  function pivotGridCandidate(domEl) {
+    if (!domEl) return null;
+    var grid = captureTableElementGrid(domEl, null);
+    if (!grid || !grid.row_count) return null;
+    if (String(grid.capture || "").indexOf("html") === 0) return null;
+    var cols = grid.columns || [];
+    for (var i = 0; i < cols.length; i++) {
+      if (String(cols[i]).toLowerCase() === "close") return null;
+    }
+    grid.capture = "data_grid";
+    return grid;
+  }
+
   function resolveTableComponent(name) {
     // 1) painted DOM often keeps live .element
     try {
@@ -2014,12 +2092,20 @@
     return new Promise(function (resolve) {
       var component = resolveTableComponent(name);
       if (!component) {
+        var missingDom = findDomByName(name);
         var htmlFallback =
-          elType === "StiPivotTableElement"
-            ? capturePivotHtml(findDomByName(name))
-            : null;
-        if (htmlFallback && htmlFallback.row_count) {
-          resolve({ parsed: htmlFallback, reason: "pick=html_grid no_component" });
+          elType === "StiPivotTableElement" ? capturePivotHtmlNear(missingDom) : null;
+        var gridFallback =
+          elType === "StiPivotTableElement" ? pivotGridCandidate(missingDom) : null;
+        var picked =
+          window.dashExportJson && window.dashExportJson.pickPivotSource
+            ? window.dashExportJson.pickPivotSource([htmlFallback, gridFallback])
+            : htmlFallback || gridFallback;
+        if (picked && picked.row_count) {
+          resolve({
+            parsed: picked,
+            reason: "pick=" + (picked.capture || "html_grid") + " no_component",
+          });
           return;
         }
         resolve({
@@ -2040,10 +2126,13 @@
             api && api.pivotDataScore ? api.pivotDataScore(viewer && viewer.parsed) : 0;
           function finish(more) {
             // Re-read painted DOM here — early capture is often empty right after drill.
-            var htmlNow = capturePivotHtml(findDomByName(name));
+            var dom = findDomByName(name);
+            var htmlNow = capturePivotHtmlNear(dom);
+            var gridNow = pivotGridCandidate(dom);
             var list = [].concat(more || []);
             if (viewerScore >= 10) list.push(viewer && viewer.parsed);
             if (htmlNow) list.push(htmlNow);
+            if (gridNow) list.push(gridNow);
             var best =
               api && api.pickPivotSource
                 ? api.pickPivotSource(list)
