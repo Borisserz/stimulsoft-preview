@@ -534,20 +534,23 @@
 
   function atlasGeomList() {
     var all = [];
-    var nodes = document.getElementsByTagName("*");
-    for (var i = 0; i < nodes.length; i++) {
-      var n = nodes[i];
-      if (!n.getAttribute) continue;
-      var ident = n.getAttribute("elementident") || "";
-      var arg = n.getAttribute("elementargument") || "";
-      var value = n.getAttribute("elementvalue") || "";
-      if (!ident && !arg && !value) continue;
-      all.push({
-        ident: ident.slice(0, 48),
-        argument: arg.slice(0, 48),
-        value: value.replace(/\s+/g, " ").trim().slice(0, 48),
-        onclick: typeof n.onclick === "function",
-      });
+    var docs = atlasDocs();
+    for (var d = 0; d < docs.length; d++) {
+      var nodes = docs[d].getElementsByTagName("*");
+      for (var i = 0; i < nodes.length; i++) {
+        var n = nodes[i];
+        var ident = atlasAttr(n, "elementident");
+        var arg = atlasAttr(n, "elementargument");
+        var value = atlasAttr(n, "elementvalue");
+        if (!ident && !arg && !value) continue;
+        if (!atlasInMap(n) && d === 0) continue;
+        all.push({
+          ident: ident.slice(0, 48),
+          argument: arg.slice(0, 48),
+          value: value.replace(/\s+/g, " ").trim().slice(0, 48),
+          onclick: typeof n.onclick === "function",
+        });
+      }
     }
     var interesting = [];
     var rest = [];
@@ -726,13 +729,37 @@
 
   function atlasHostType(node) {
     var cur = node;
-    for (var i = 0; i < 14 && cur; i++) {
+    for (var i = 0; i < 40 && cur; i++) {
       if (cur.elementAttributes && cur.elementAttributes.type) {
         return String(cur.elementAttributes.type);
       }
       cur = cur.parentElement || cur.parentNode;
     }
     return "";
+  }
+
+  function atlasDocs() {
+    var docs = [document];
+    var frames = document.getElementsByTagName("iframe");
+    for (var i = 0; i < frames.length; i++) {
+      try {
+        var doc = frames[i].contentDocument;
+        if (doc && doc.body) docs.push(doc);
+      } catch (e) {}
+    }
+    return docs;
+  }
+
+  /** Map widget, including an SVG that Stimulsoft painted inside an iframe. */
+  function atlasInMap(node) {
+    if (!node) return false;
+    if (atlasHostType(node).indexOf("Map") >= 0) return true;
+    try {
+      var view = node.ownerDocument && node.ownerDocument.defaultView;
+      if (view && view.frameElement && atlasHostType(view.frameElement).indexOf("Map") >= 0)
+        return true;
+    } catch (e) {}
+    return false;
   }
 
   function atlasAttr(n, name) {
@@ -748,15 +775,18 @@
   /** Any map node that carries a drill attribute. Not only path. Not table text. */
   function atlasMapGeoms() {
     var out = [];
-    var nodes = document.getElementsByTagName("*");
-    for (var i = 0; i < nodes.length; i++) {
-      var n = nodes[i];
-      var arg = atlasAttr(n, "elementargument");
-      var ident = atlasAttr(n, "elementident");
-      var value = atlasAttr(n, "elementvalue");
-      if (!arg && !ident && !value) continue;
-      if (atlasHostType(n).indexOf("Map") < 0) continue;
-      out.push(n);
+    var docs = atlasDocs();
+    for (var d = 0; d < docs.length; d++) {
+      var nodes = docs[d].getElementsByTagName("*");
+      for (var i = 0; i < nodes.length; i++) {
+        var n = nodes[i];
+        var arg = atlasAttr(n, "elementargument");
+        var ident = atlasAttr(n, "elementident");
+        var value = atlasAttr(n, "elementvalue");
+        if (!arg && !ident && !value) continue;
+        if (!atlasInMap(n)) continue;
+        out.push(n);
+      }
     }
     return out;
   }
@@ -780,10 +810,20 @@
     return !!(re && re.test(blob));
   }
 
+  function atlasMapTexts() {
+    var out = [];
+    var docs = atlasDocs();
+    for (var d = 0; d < docs.length; d++) {
+      var texts = docs[d].querySelectorAll("text, tspan, title");
+      for (var i = 0; i < texts.length; i++) out.push(texts[i]);
+    }
+    return out;
+  }
+
   function atlasMapLabelReady() {
-    var texts = document.querySelectorAll("text, tspan");
+    var texts = atlasMapTexts();
     for (var i = 0; i < texts.length; i++) {
-      if (atlasHostType(texts[i]).indexOf("Map") < 0) continue;
+      if (!atlasInMap(texts[i])) continue;
       var label = String(texts[i].textContent || "").replace(/\s+/g, " ").trim();
       if (!label || label.length > 48) continue;
       if (/брест|витеб|гомел|гродн|могил|минск|brest|gomel/i.test(label)) return true;
@@ -825,12 +865,12 @@
       }
     }
     if (best) return atlasFireGeom(best, "map-onclick");
-    var texts = document.querySelectorAll("text, tspan, title");
+    var texts = atlasMapTexts();
     var textBest = null;
     var textLen = 9999;
     for (var t = 0; t < texts.length; t++) {
       var node = texts[t];
-      if (atlasHostType(node).indexOf("Map") < 0) continue;
+      if (!atlasInMap(node)) continue;
       if (node.getElementsByTagName && node.getElementsByTagName("tspan").length) continue;
       var label = String(node.textContent || "").replace(/\s+/g, " ").trim();
       if (!label || label.length > 48) continue;
@@ -843,12 +883,26 @@
     if (textBest) {
       var target = textBest;
       var cur = textBest;
-      for (var up = 0; up < 8 && cur; up++) {
-        if (typeof cur.onclick === "function" && atlasHostType(cur).indexOf("Map") >= 0) {
+      for (var up = 0; up < 20 && cur; up++) {
+        if (typeof cur.onclick === "function" && atlasInMap(cur)) {
           target = cur;
           break;
         }
         cur = cur.parentElement || cur.parentNode;
+      }
+      if (typeof target.onclick !== "function") {
+        var parent = textBest.parentNode;
+        for (var depth = 0; depth < 4 && parent; depth++) {
+          var kids = parent.getElementsByTagName ? parent.getElementsByTagName("*") : [];
+          for (var k = 0; k < kids.length; k++) {
+            if (typeof kids[k].onclick !== "function") continue;
+            if (!atlasBlobMatches(atlasGeomBlob(kids[k]), re, skipRe)) continue;
+            target = kids[k];
+            depth = 4;
+            break;
+          }
+          parent = parent.parentNode;
+        }
       }
       return atlasFireGeom(target, "map-text");
     }
