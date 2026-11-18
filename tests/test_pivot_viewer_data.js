@@ -471,6 +471,17 @@ ok(
   mod.pickPivotSource([shiftedHtml, goodPivot]).capture === "pivot_viewer",
   "pivot beats shifted html"
 );
+var junkPercent = {
+  capture: "html_grid",
+  columns: ["P6"],
+  rows: [{ P6: "25%" }],
+  row_count: 1,
+};
+ok(mod.pickPivotSource([junkPercent]) == null, "one-row percent html rejected");
+ok(
+  mod.pickPivotSource([junkPercent, goodPivot]).capture === "pivot_viewer",
+  "pivot beats one-row percent"
+);
 ok(mod.mapKeyToRu("GomelskayaVoblasts") === "Гомельская", "gomel");
 ok(mod.regionBlobMatches("BY-BR 7 099,31", /brest|брест|brestska/i), "code BY-BR is Brest");
 ok(mod.regionBlobMatches("BY-HO", /gomel|гомел/i), "code BY-HO is Gomel");

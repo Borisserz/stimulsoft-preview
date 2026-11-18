@@ -1013,6 +1013,25 @@
       });
   }
 
+  function atlasShowCountryMap() {
+    try {
+      var jo = findViewerJsObject();
+      if (jo && jo.reportParams) {
+        jo.reportParams.pageNumber = 0;
+        jo.reportParams.dashboardDrillDownGuid = null;
+        if (typeof jo.postAction === "function") jo.postAction("Refresh");
+      }
+      lastAtlasNav = { text: "country", via: "exit-drill", changed: true, page: 0 };
+    } catch (e) {
+      lastAtlasNav = { text: "country", via: "error", changed: false, page: 0 };
+    }
+    return atlasWaitUntil(function () {
+      return atlasMapGeoms().length > 0 || atlasMapLabelReady();
+    }, 8000).then(function () {
+      return atlasWaitStable(4000);
+    });
+  }
+
   function runAtlasAuto() {
     showText("ATLAS: pages, potom kazhdaya oblast i rayon vnutri...", "ATLAS");
     var pages = listReportPages();
@@ -1039,7 +1058,7 @@
       }
     }
     chain = chain.then(function () {
-      return gotoReportPage(page0.index);
+      return atlasShowCountryMap();
     });
     chain = chain.then(function () {
       probeBox = atlasProbe();
@@ -1060,7 +1079,7 @@
     ];
     oblasts.forEach(function (ob) {
       chain = chain.then(function () {
-        return gotoReportPage(page0.index);
+        return atlasShowCountryMap();
       });
       chain = chain.then(function () {
         return atlasWaitUntil(function () {
@@ -1080,7 +1099,7 @@
       });
     });
     chain = chain.then(function () {
-      return gotoReportPage(page0.index);
+      return atlasShowCountryMap();
     });
     chain = chain.then(function () {
       return atlasButtonShot(
@@ -1865,18 +1884,27 @@
     return parsed;
   }
 
-  /** Painted cells sometimes sit just outside the pivot node. */
+  /** Painted cells sometimes sit just outside the pivot node. Skip a 1-row percent. */
   function capturePivotHtmlNear(domEl) {
-    var local = capturePivotHtml(domEl);
-    if (local && local.row_count) return local;
+    var best = null;
+    var bestScore = 0;
+    function consider(parsed) {
+      if (!parsed || !parsed.row_count || parsed.row_count < 2) return;
+      var api = window.dashExportJson;
+      var sc = api && api.pivotDataScore ? api.pivotDataScore(parsed) : parsed.row_count;
+      if (sc > bestScore) {
+        best = parsed;
+        bestScore = sc;
+      }
+    }
+    consider(capturePivotHtml(domEl));
     var root = domEl;
     for (var i = 0; i < 4 && root && root.parentElement; i++) {
       root = root.parentElement;
       if (root.id === "dash-debug-panel") break;
-      var wider = capturePivotHtml(root);
-      if (wider && wider.row_count) return wider;
+      consider(capturePivotHtml(root));
     }
-    return null;
+    return best;
   }
 
   function pivotGridCandidate(domEl) {

@@ -999,6 +999,7 @@
     (list || []).forEach(function (p) {
       if (!p || !p.row_count) return;
       if (htmlGridLooksShifted(p)) return;
+      if (p.capture === "html_grid" && p.row_count < 2) return;
       var sc = pivotDataScore(p);
       // Total/Итог with 0,0 only — not real drill data (Pinsk case).
       if (sc < 10) return;
