@@ -72,8 +72,7 @@ _RENDER_QUERY_SKIP = {
 }
 
 
-def load_env() -> None:
-    path = ROOT / ".env"
+def _apply_env_file(path: Path, override: bool) -> None:
     if not path.is_file():
         return
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -81,7 +80,17 @@ def load_env() -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, v = line.split("=", 1)
-        os.environ[k.strip()] = v.strip().strip("'\"")
+        key = k.strip()
+        if not override and os.environ.get(key, "").strip():
+            continue
+        os.environ[key] = v.strip().strip("'\"")
+
+
+def load_env() -> None:
+    """Корень, затем local/.env. На работе mrt и env лежат в local/."""
+    _apply_env_file(ROOT / ".env", override=True)
+    _apply_env_file(ROOT / "local" / ".env", override=True)
+    _apply_env_file(ROOT / "local" / "db.env", override=False)
 
 
 def path_of(raw: str) -> Path:
@@ -104,7 +113,14 @@ def apply_license(component) -> None:
     if key:
         component.license.setKey(key)
     elif file_raw:
-        component.license.setFile(str(path_of(file_raw).resolve()))
+        lic = path_of(file_raw)
+        if not lic.is_file():
+            named = ROOT / "local" / Path(file_raw).name
+            if named.is_file():
+                lic = named
+        component.license.setFile(str(lic.resolve()))
+    elif (ROOT / "local" / "license.key").is_file():
+        component.license.setFile(str((ROOT / "local" / "license.key").resolve()))
 
 
 def apply_filter_panel_ui(viewer_options) -> None:
@@ -253,13 +269,30 @@ def inject_filter_panel_layout(html: str) -> str:
 
 load_env()
 
+def resolve_mrt(raw: str) -> Path | None:
+    if raw:
+        chosen = path_of(raw)
+        if chosen.is_file():
+            return chosen
+        named = ROOT / "local" / Path(raw).name
+        if named.is_file():
+            return named
+        return chosen
+    found = sorted((ROOT / "local").glob("*.mrt")) if (ROOT / "local").is_dir() else []
+    if len(found) == 1:
+        return found[0]
+    return None
+
+
 _mrt = os.environ.get("MRT_PATH", "").strip()
 if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
-    MRT_PATH = path_of(sys.argv[1])
+    MRT_PATH = resolve_mrt(sys.argv[1]) or path_of(sys.argv[1])
 elif _mrt:
-    MRT_PATH = path_of(_mrt)
+    MRT_PATH = resolve_mrt(_mrt) or path_of(_mrt)
 else:
-    raise SystemExit("Задай MRT_PATH в .env")
+    MRT_PATH = resolve_mrt("")
+if MRT_PATH is None:
+    raise SystemExit("Задай MRT_PATH в local/.env или положи один .mrt в local/")
 if not MRT_PATH.is_file():
     raise SystemExit(f"Нет .mrt: {MRT_PATH}")
 
