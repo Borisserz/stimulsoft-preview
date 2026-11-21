@@ -6,14 +6,6 @@ Docs / samples:
   Showing a Dashboard in the Viewer
   How to Activate the Product
   Using Parameters in SQL Query (onBeginProcessData)
-  Setting Dashboard Variables on the Server-Side
-  passQueryParametersToReport / onPrepareVariables / onInteraction
-
-Параметры:
-  POST /api/params  {"Region":"West","Visits":5}
-  GET  /api/params
-  GET  /viewer?Region=West   (query → переменные mrt)
-  клики/фильтры на дашборде → POST /api/params (onInteraction)
 
 Запуск:
   .venv/bin/pip install -r requirements.txt
@@ -22,61 +14,62 @@ Docs / samples:
 
 from __future__ import annotations
 
+import base64
 import json
 import os
+import re
+import secrets
 import sys
 import threading
+import time
 import webbrowser
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 from urllib.parse import quote_plus, urlparse
 
 import stimulsoft_dashboards  # noqa: F401 — подтягивает dashboards.js
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, request, session
 from stimulsoft_data_adapters.enums.StiFrameworkType import StiFrameworkType
 from stimulsoft_reports.classes.StiResult import StiResult
 from stimulsoft_reports.designer import StiDesigner
-from stimulsoft_reports.events import (
-    StiDataEventArgs,
-    StiReportEventArgs,
-    StiVariablesEventArgs,
-)
+from stimulsoft_reports.events import StiDataEventArgs, StiReportEventArgs, StiVariablesEventArgs
 from stimulsoft_reports.report import StiReport
-from stimulsoft_reports.report.dictionary.StiVariable import StiVariable
-from stimulsoft_reports.report.enums.StiVariableType import StiVariableType
 from stimulsoft_reports.viewer import StiViewer
+from stimulsoft_reports.viewer.enums.StiParametersPanelPosition import (
+    StiParametersPanelPosition,
+)
+from stimulsoft_reports.viewer.options.StiAppearanceOptions import StiAppearanceOptions
 
-from ask_plan import plan_ask
-from query_request import QueryFilterError, filters_from_body, viewer_path
-from llm_pack import (
-    build_results_digest,
-    build_verify_report,
-    dumps_llm_pack,
-    enrich_interaction,
-    is_real_filter_key,
-    sanitize_filters,
-    snapshot_from_data_args,
-    update_filter_state,
-)
-from atlas_pack import (
-    ATLAS_PAGE_HTML,
-    apply_atlas_post,
-    build_atlas_text,
-    normalize_atlas,
-)
-from structure_pack import (
-    STRUCTURE_PAGE_HTML,
-    build_structure_text,
-    structure_from_viewport,
-)
-from viewport_pack import (
-    build_viewport_compare_text,
-    build_viewport_pack,
-    normalize_viewport,
-)
+# JS default=5: при t<=5 колонок всегда 1 → фильтры столбиком. Патчим класс,
+# чтобы getHtml() сериализовал override.
+if not hasattr(StiAppearanceOptions, "minParametersCountForMultiColumns"):
+    StiAppearanceOptions.minParametersCountForMultiColumns = 5
 
 ROOT = Path(__file__).resolve().parent
+_SAFE_NAME = re.compile(r"[^\w.\-]+", re.UNICODE)
+
+# token → {VariableName: value}; legacy ?rf= (можно не использовать)
+RENDER_FILTER_STORE: dict[str, dict[str, object]] = {}
+# последние фильтры /open — без rf в URL (curl POST → браузер на /open)
+LATEST_RENDER_FILTERS: dict[str, object] = {}
+# GET /shot → сигнал уже открытому /open (без перезагрузки дашборда)
+_SHOT_LOCK = threading.Lock()
+_SHOT_PENDING: dict[str, float] = {}
+_SHOT_RESULTS: dict[str, dict[str, object]] = {}
+_RENDER_QUERY_SKIP = {
+    "run_queries",
+    "sql",
+    "filters",
+    "sti_event",
+    "sti_data",
+    "event",
+    "rf",
+    "no_redirect",
+    "redirect",
+    "open",
+    "autoscreenshot",
+    "shot_ui",
+}
 
 
 def load_env() -> None:
@@ -114,16 +107,155 @@ def apply_license(component) -> None:
         component.license.setFile(str(path_of(file_raw).resolve()))
 
 
+def apply_filter_panel_ui(viewer_options) -> None:
+    """Фильтры в строку сверху; Submit/Reset → Применить/Сбросить (ru)."""
+    viewer_options.localization = "ru"
+    appearance = viewer_options.appearance
+    appearance.parametersPanelPosition = StiParametersPanelPosition.TOP
+    # иначе mobile JS форсит Left + 1 колонку
+    appearance.allowMobileMode = False
+    # Stimulsoft: columns = 1 если count <= minParametersCountForMultiColumns (дефолт 5)
+    appearance.minParametersCountForMultiColumns = 1
+    appearance.parametersPanelColumnsCount = 8
+
+
+def filter_param_width() -> int:
+    """Ширина контролов панели фильтров, px. FILTER_PARAM_WIDTH в .env."""
+    raw = (os.environ.get("FILTER_PARAM_WIDTH") or "180").strip() or "180"
+    try:
+        width = int(raw)
+    except ValueError:
+        width = 180
+    return max(80, min(width, 600))
+
+
+def inject_filter_panel_layout(html: str) -> str:
+    """Шире контролы; кнопки Сброс/Применить в той же строке, что фильтры."""
+    if "dashFilterPanelLayout" in html:
+        return html
+    w = filter_param_width()
+    block = (
+        "<style id=\"dashFilterPanelLayout\">\n"
+        ".stiJsViewerParametersPanel .stiJsViewerTextBoxDefault input,\n"
+        ".stiJsViewerParametersPanel input.stiJsViewerTextBox,\n"
+        ".stiJsViewerParametersPanel .stiJsViewerTextBox {\n"
+        f"  min-width: {w}px !important;\n"
+        f"  width: {w}px !important;\n"
+        "}\n"
+        ".stiJsViewerParametersPanel [id$=\"MainButtons\"] {\n"
+        "  margin-top: 0 !important;\n"
+        "  white-space: nowrap;\n"
+        "}\n"
+        "</style>\n"
+        "<script>(function(){\n"
+        f"  var PARAM_W = {w};\n"
+        "  function widen(js){\n"
+        "    try { js.options.currentParameterWidth = PARAM_W; } catch (e) {}\n"
+        "    try {\n"
+        "      var r = (window.__dashReport || (window.__dashViewer && window.__dashViewer.report)\n"
+        "               || (window.viewer && window.viewer.report));\n"
+        "      if (r) r.parameterWidth = PARAM_W;\n"
+        "    } catch (e2) {}\n"
+        "    try {\n"
+        "      var panel = js.controls && js.controls.parametersPanel;\n"
+        "      if (!panel || !panel.container) return;\n"
+        "      var inputs = panel.container.querySelectorAll('input');\n"
+        "      for (var i = 0; i < inputs.length; i++) {\n"
+        "        inputs[i].style.width = PARAM_W + 'px';\n"
+        "        inputs[i].style.minWidth = PARAM_W + 'px';\n"
+        "      }\n"
+        "    } catch (e3) {}\n"
+        "  }\n"
+        "  function sameRow(panel){\n"
+        "    var btn = panel && panel.mainButtons;\n"
+        "    if (!btn) return false;\n"
+        "    var table = panel.container && panel.container.querySelector('table');\n"
+        "    if (!table || !table.rows || !table.rows.length) return false;\n"
+        "    var row0 = table.rows[0];\n"
+        "    var target = null;\n"
+        "    for (var g = 0; g + 1 < row0.cells.length; g += 2) {\n"
+        "      var nameCell = row0.cells[g];\n"
+        "      var ctrlCell = row0.cells[g + 1];\n"
+        "      var hasName = !!(nameCell && String(nameCell.innerText || '').trim());\n"
+        "      var hasCtrl = !!(ctrlCell && ctrlCell.querySelector(\n"
+        "        '.stiJsViewerTextBoxDefault, table, input, select'));\n"
+        "      if (!hasName && !hasCtrl) { target = ctrlCell; break; }\n"
+        "    }\n"
+        "    if (!target) {\n"
+        "      var nc = row0.insertCell(-1);\n"
+        "      nc.style.padding = '0 10px 0 30px';\n"
+        "      target = row0.insertCell(-1);\n"
+        "      target.style.padding = '0';\n"
+        "    } else {\n"
+        "      try { target.previousElementSibling.style.padding = '0 10px 0 30px'; } catch (e0) {}\n"
+        "    }\n"
+        "    target.style.verticalAlign = 'bottom';\n"
+        "    if (btn.parentNode !== target) target.appendChild(btn);\n"
+        "    btn.style.marginTop = '0';\n"
+        "    for (var r = table.rows.length - 1; r >= 1; r--) {\n"
+        "      var row = table.rows[r];\n"
+        "      var empty = true;\n"
+        "      for (var c = 0; c < row.cells.length; c++) {\n"
+        "        if (row.cells[c].childNodes.length) { empty = false; break; }\n"
+        "      }\n"
+        "      if (empty) table.deleteRow(r);\n"
+        "    }\n"
+        "    return true;\n"
+        "  }\n"
+        "  function fix(){\n"
+        "    var viewer = window.__dashViewer || window.viewer;\n"
+        "    var js = viewer && viewer.jsObject;\n"
+        "    if (!js) return false;\n"
+        "    widen(js);\n"
+        "    var panel = js.controls && js.controls.parametersPanel;\n"
+        "    if (!panel) return false;\n"
+        "    try {\n"
+        "      if (js.collections && js.collections.loc) js.collections.loc.Reset = 'Сбросить';\n"
+        "      if (panel.mainButtons && panel.mainButtons.reset) {\n"
+        "        var b = panel.mainButtons.reset;\n"
+        "        if (b.caption) b.caption.innerText = 'Сбросить';\n"
+        "        else if (b.innerText) b.innerText = 'Сбросить';\n"
+        "      }\n"
+        "    } catch (e4) {}\n"
+        "    return sameRow(panel);\n"
+        "  }\n"
+        "  var n = 0;\n"
+        "  var t = setInterval(function(){\n"
+        "    n++;\n"
+        "    var ok = fix();\n"
+        "    if (ok || n > 80) {\n"
+        "      clearInterval(t);\n"
+        "      if (!ok) return;\n"
+        "      try {\n"
+        "        var viewer = window.__dashViewer || window.viewer;\n"
+        "        var panel = viewer && viewer.jsObject && viewer.jsObject.controls\n"
+        "                   && viewer.jsObject.controls.parametersPanel;\n"
+        "        var root = panel && panel.container;\n"
+        "        if (!root || root.__dashLayoutObs) return;\n"
+        "        root.__dashLayoutObs = new MutationObserver(function(){\n"
+        "          if (root.__dashFixing) return;\n"
+        "          root.__dashFixing = true;\n"
+        "          try { fix(); } finally { root.__dashFixing = false; }\n"
+        "        });\n"
+        "        root.__dashLayoutObs.observe(root, { childList: true });\n"
+        "      } catch (e5) {}\n"
+        "    }\n"
+        "  }, 200);\n"
+        "  setTimeout(fix, 0);\n"
+        "})();</script>\n"
+    )
+    if "</head>" in html:
+        return html.replace("</head>", block + "</head>", 1)
+    if "</body>" in html:
+        return html.replace("</body>", block + "</body>", 1)
+    return html + block
+
+
 load_env()
 
 _mrt = os.environ.get("MRT_PATH", "").strip()
-_argv_mrt = ""
 if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
-    # only treat CLI arg as MRT when it looks like a report path (not unittest module)
-    if sys.argv[1].lower().endswith(".mrt"):
-        _argv_mrt = sys.argv[1]
-if _argv_mrt:
-    MRT_PATH = path_of(_argv_mrt)
+    MRT_PATH = path_of(sys.argv[1])
 elif _mrt:
     MRT_PATH = path_of(_mrt)
 else:
@@ -134,6 +266,7 @@ if not MRT_PATH.is_file():
 HOST = os.environ.get("VIEWER_HOST", "127.0.0.1")
 PORT = int(os.environ.get("VIEWER_PORT", "8040") or "8040")
 OPEN_BROWSER = os.environ.get("VIEWER_OPEN", "1").lower() in {"1", "true", "yes"}
+EXPORT_DIR = path_of(os.environ.get("EXPORT_DIR", "exports").strip() or "exports")
 
 _db = os.environ.get("DATABASE_URL", "").strip()
 if not _db:
@@ -158,279 +291,438 @@ if not PG_CONN:
     raise SystemExit("Нет DATABASE_URL / POSTGRES_USER+PASSWORD+DB в .env")
 
 app = Flask(__name__)
-
-# Последние параметры: POST /api/params, query /viewer?X=, клики onInteraction.
-_params_lock = threading.Lock()
-_PARAMS: dict[str, Any] = {}
-_LAST_INTERACTION: dict[str, Any] | None = None
-_INTERACTIONS: list[dict[str, Any]] = []
-_INTERACTIONS_MAX = 50
-# SQL/onEndProcessData snapshot — debug only, NOT for LLM pack.
-_RESULTS: dict[str, Any] = {}
-# Full visible dashboard snapshot from client (source of truth for LLM/SVERKA).
-_VIEWPORT: dict[str, Any] | None = None
-# Multi-page + manual scenario inventory (ATLAS).
-_ATLAS: dict[str, Any] | None = None
-_FILTERS_UPDATED_AT: str | None = None
-_FILTER_GEN: int = 0
-_APPLIED_LOG: list[dict[str, Any]] = []
-_APPLIED_LOG_MAX = 100
-# last BeginProcessData params per datasource (for verify / freshness)
-_PENDING_APPLY: dict[str, dict[str, Any]] = {}
-# region drill-in levels (kept for interaction enrichment / debug)
-_DRILL_STACK: list[list[dict[str, Any]]] = []
-# Apply-Filter from map/table/list clicks (debug / interaction enrich)
-_APPLY_FILTERS: list[dict[str, Any]] = []
-
-
-def _now_stamp() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-_STI_QUERY_SKIP = {"sti_event", "sti_data", "sti_handler"}
-
-
-def _load_debug_js() -> str:
-    # read each time; utf-8-sig strips BOM if Windows editors added it.
-    # export_json_parse.js first — pure Table→JSON helpers for hybrid capture.
-    parts = [
-        (ROOT / "export_json_parse.js").read_text(encoding="utf-8-sig"),
-        (ROOT / "dash_debug.js").read_text(encoding="utf-8-sig"),
-    ]
-    return "\n".join(parts)
-
-
-def _public_query_params() -> dict[str, str]:
-    return {
-        k: v
-        for k, v in request.args.items()
-        if k not in _STI_QUERY_SKIP and not k.startswith("sti_")
-    }
-
-
-def _body_params() -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    if request.form:
-        out.update({k: v for k, v in request.form.items()})
-    if request.is_json:
-        body = request.get_json(silent=True)
-        if isinstance(body, dict):
-            nested = body.get("params")
-            if isinstance(nested, dict):
-                out.update(nested)
-            else:
-                out.update(
-                    {
-                        k: v
-                        for k, v in body.items()
-                        if k not in {"params", "interaction"}
-                    }
-                )
-    return out
-
-
-def params_snapshot() -> dict[str, Any]:
-    with _params_lock:
-        return dict(_PARAMS)
-
-
-def params_update(values: dict[str, Any], *, clear_results_on_change: bool = True) -> dict[str, Any]:
-    global _FILTERS_UPDATED_AT, _FILTER_GEN, _DRILL_STACK, _APPLY_FILTERS, _VIEWPORT
-    with _params_lock:
-        real_changed = False
-        for key, value in values.items():
-            if not is_real_filter_key(key):
-                # UI junk from interaction flatten: "0","1","на 1 января" labels, __action
-                continue
-            key_s = str(key)
-            if value is None:
-                if key_s in _PARAMS:
-                    _PARAMS.pop(key_s, None)
-                    real_changed = True
-            else:
-                if _PARAMS.get(key_s) != value:
-                    real_changed = True
-                _PARAMS[key_s] = value
-        # drop junk already sitting in the store (does NOT bump generation alone)
-        for junk in [k for k in list(_PARAMS.keys()) if not is_real_filter_key(k)]:
-            _PARAMS.pop(junk, None)
-        if real_changed:
-            _FILTERS_UPDATED_AT = _now_stamp()
-            _FILTER_GEN += 1
-            if clear_results_on_change:
-                # Year/Month changed — drop old SQL debug + viewport until new paint
-                _RESULTS.clear()
-                _VIEWPORT = None
-                _PENDING_APPLY.clear()
-                # Year/Month change invalidates map drill / apply-filter state
-                _DRILL_STACK = []
-                _APPLY_FILTERS = []
-        return dict(_PARAMS)
-
-
-def coerce_value(type_name: str, value: Any) -> Any:
-    if value is None or type_name is None:
-        return value
-    if isinstance(value, (dict, list)):
-        return value
-    text = value if isinstance(value, str) else str(value)
-    try:
-        if type_name in {
-            StiVariableType.INT,
-            StiVariableType.INT16,
-            StiVariableType.INT32,
-            StiVariableType.INT64,
-            StiVariableType.SHORT,
-            StiVariableType.LONG,
-            StiVariableType.BYTE,
-            StiVariableType.SBYTE,
-            StiVariableType.UINT,
-            StiVariableType.UINT16,
-            StiVariableType.UINT32,
-            StiVariableType.UINT64,
-            StiVariableType.USHORT,
-            StiVariableType.ULONG,
-        }:
-            return int(float(text)) if text != "" else value
-        if type_name in {
-            StiVariableType.DOUBLE,
-            StiVariableType.DECIMAL,
-            StiVariableType.SINGLE,
-            "Float",
-        }:
-            return float(text) if text != "" else value
-        if type_name == StiVariableType.BOOLEAN:
-            if isinstance(value, bool):
-                return value
-            return text.strip().lower() in {"1", "true", "yes", "y", "on"}
-        if type_name == StiVariableType.DATETIME:
-            if isinstance(value, datetime):
-                return value
-            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
-                try:
-                    return datetime.strptime(text, fmt)
-                except ValueError:
-                    continue
-    except (TypeError, ValueError):
-        return value
-    return value
-
-
-def _variable_values(args: StiVariablesEventArgs) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    variables = args.variables or {}
-    for name, var in variables.items():
-        out[str(name)] = getattr(var, "value", var)
-    return out
-
-
-def apply_params_to_variables(args: StiVariablesEventArgs) -> None:
-    incoming = params_snapshot()
-    incoming.update(_public_query_params())
-    if not incoming:
-        return
-    variables = args.variables
-    if variables is None:
-        args.variables = {}
-        variables = args.variables
-    for name, raw in incoming.items():
-        if str(name).startswith("__"):
-            continue
-        if name in variables:
-            var = variables[name]
-            var.value = coerce_value(var.typeName, raw)
-        else:
-            variables[name] = StiVariable(name, StiVariableType.STRING, str(raw))
+app.secret_key = (
+    os.environ.get("FLASK_SECRET", "").strip()
+    or os.environ.get("SECRET_KEY", "").strip()
+    or "dash-render-filters-dev"
+)
 
 
 def begin_process_data(args: StiDataEventArgs) -> None:
     args.connectionString = PG_CONN
-    incoming = params_snapshot()
-    applied: dict[str, Any] = {}
-    if args.parameters:
-        for name, param in args.parameters.items():
-            if name in incoming:
-                param.value = incoming[name]
-            applied[str(name)] = getattr(param, "value", None)
-    ds = str(getattr(args, "dataSource", None) or getattr(args, "connection", None) or "unknown")
-    with _params_lock:
-        _PENDING_APPLY[ds] = {
-            "applied_params": dict(applied),
-            "filters_snapshot": dict(_PARAMS),
-            "started_at": _now_stamp(),
-            "gen": _FILTER_GEN,
-        }
 
 
-def end_process_data(args: StiDataEventArgs) -> None:
-    """Сохраняем готовые rows датасорса (карта/таблица/KPI) без SQL."""
-    name, payload = snapshot_from_data_args(args)
-    if payload is None:
-        return
-    stamp = _now_stamp()
-    with _params_lock:
-        pending = dict(_PENDING_APPLY.pop(name, {}) or {})
-        # ответ от запроса со старыми Year/Month — выбрасываем
-        if pending and pending.get("gen") != _FILTER_GEN:
+def _parse_filters_payload(raw) -> dict[str, object]:
+    """Нормализовать тело/квери в {VariableName: value}."""
+    if raw is None:
+        return {}
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return {}
+        try:
+            raw = json.loads(s)
+        except json.JSONDecodeError:
+            return {}
+    if not isinstance(raw, dict):
+        return {}
+    # {"filters": {...}} или сразу {Name: value}
+    inner = raw.get("filters") if isinstance(raw.get("filters"), dict) else raw
+    if not isinstance(inner, dict):
+        return {}
+    out: dict[str, object] = {}
+    for key, value in inner.items():
+        if key in {"mrt", "run_queries", "sql", "kind", "count"}:
+            continue
+        name = str(key).strip()
+        if not name:
+            continue
+        out[name] = value
+    return out
+
+
+def _coerce_variable_value(type_name: str | None, value: object) -> object:
+    """Подогнать value под Stimulsoft typeName (String, Int32, DateTime, StringList, …)."""
+    if value is None:
+        return None
+    t = (type_name or "").lower()
+    if t.endswith("list"):
+        if isinstance(value, list):
+            return list(value)
+        if isinstance(value, str):
+            s = value.strip()
+            if s.startswith("["):
+                try:
+                    parsed = json.loads(s)
+                    if isinstance(parsed, list):
+                        return parsed
+                except json.JSONDecodeError:
+                    pass
+            if "," in s:
+                return [p.strip() for p in s.split(",") if p.strip()]
+            return [s] if s else []
+        return [value]
+    if t.endswith("range"):
+        if isinstance(value, dict):
+            return {"from": value.get("from"), "to": value.get("to")}
+        return value
+    if "datetime" in t or t == "date":
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, str) and value.strip():
+            s = value.strip().replace("Z", "").replace("T", " ")
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                try:
+                    return datetime.strptime(s[:19] if " " in s else s[:10], fmt)
+                except ValueError:
+                    continue
+            try:
+                return datetime.fromisoformat(value.strip().replace("Z", ""))
+            except ValueError:
+                return value
+        return value
+    if t in {"int", "int32", "int64", "uint", "uint32", "uint64", "byte", "sbyte", "short", "ushort"} or t.endswith("int32") or t.endswith("int64"):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return value
+    if t in {"decimal", "double", "float", "single"} or "decimal" in t or "double" in t:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return value
+    if t in {"bool", "boolean"}:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+    return value
+
+
+def _store_render_filters(filters: dict[str, object]) -> str:
+    token = secrets.token_urlsafe(12)
+    RENDER_FILTER_STORE[token] = dict(filters)
+    # не раздувать память
+    while len(RENDER_FILTER_STORE) > 64:
+        RENDER_FILTER_STORE.pop(next(iter(RENDER_FILTER_STORE)), None)
+    return token
+
+
+def _remember_filters(filters: dict[str, object]) -> None:
+    """Session + last-wins (для /open без ?rf=)."""
+    data = dict(filters)
+    session["render_filters"] = data
+    LATEST_RENDER_FILTERS.clear()
+    LATEST_RENDER_FILTERS.update(data)
+
+
+def _load_render_filters(token: str | None) -> dict[str, object] | None:
+    if not token:
+        return None
+    got = RENDER_FILTER_STORE.get(token)
+    return dict(got) if isinstance(got, dict) else None
+
+
+def _resolve_filters(
+    token: str | None = None,
+    incoming: dict[str, object] | None = None,
+) -> dict[str, object] | None:
+    """rf (legacy) → session → LATEST → incoming."""
+    for cand in (
+        _load_render_filters(token),
+        session.get("render_filters"),
+        LATEST_RENDER_FILTERS,
+        incoming,
+    ):
+        if isinstance(cand, dict) and cand:
+            return dict(cand)
+    return None
+
+
+def make_prepare_variables(filters: dict[str, object]):
+    """onPrepareVariables: подставить переданные фильтры перед рендером."""
+
+    def prepare_variables(args: StiVariablesEventArgs) -> None:
+        if not filters:
+            print("prepareVariables skip: no filters", flush=True)
             return
-        payload = dict(payload)
-        payload["captured_at"] = stamp
-        payload["applied_params"] = dict(pending.get("applied_params") or {})
-        _RESULTS[name] = payload
-        _APPLIED_LOG.append(
-            {
-                "dataSource": name,
-                "applied_params": dict(pending.get("applied_params") or {}),
-                "filters_snapshot": dict(pending.get("filters_snapshot") or _PARAMS),
-                "row_count": payload.get("row_count"),
-                "captured_at": stamp,
-                "gen": pending.get("gen"),
-            }
-        )
-        overflow = len(_APPLIED_LOG) - _APPLIED_LOG_MAX
-        if overflow > 0:
-            del _APPLIED_LOG[:overflow]
-
-
-def results_snapshot() -> dict[str, Any]:
-    with _params_lock:
-        return {k: dict(v) for k, v in _RESULTS.items()}
-
-
-def llm_pack_snapshot() -> dict[str, Any]:
-    """LLM pack from viewport only (what the human sees)."""
-    with _params_lock:
-        vp = dict(_VIEWPORT) if isinstance(_VIEWPORT, dict) else None
-        inter = _LAST_INTERACTION
-        panel = sanitize_filters(_PARAMS)
-    pack = build_viewport_pack(vp)
-    # merge server-known panel vars if client omitted them
-    if panel:
-        merged = dict(pack.get("filters") or {})
-        for k, v in panel.items():
-            merged.setdefault(k, v)
-        pack["filters"] = merged
-    if inter and not pack.get("interaction"):
-        pack["interaction"] = inter
-    return pack
-
-
-def verify_snapshot() -> dict[str, Any]:
-    with _params_lock:
-        return build_verify_report(
-            filters=sanitize_filters(_PARAMS),
-            results={k: dict(v) for k, v in _RESULTS.items()},
-            filters_updated_at=_FILTERS_UPDATED_AT,
-            applied_log=list(_APPLIED_LOG),
+        variables = args.variables
+        if not variables:
+            print(
+                f"prepareVariables skip: empty variables from client; wanted={list(filters.keys())}",
+                flush=True,
+            )
+            return
+        # name + alias → real variable key
+        index = _mrt_var_index()
+        by_lower = {str(name).lower(): name for name in variables.keys()}
+        ordered = list(variables.items())
+        applied = []
+        missed = []
+        for name, value in filters.items():
+            key = by_lower.get(str(name).lower())
+            if key is None:
+                meta = index.get(str(name).lower())
+                if meta and meta.get("name"):
+                    key = by_lower.get(str(meta["name"]).lower())
+            # запасной путь: числовой индекс среди variables (обрезанный .mrt без Name)
+            if key is None and str(name).isdigit():
+                idx = int(str(name))
+                if 0 <= idx < len(ordered):
+                    key = ordered[idx][0]
+            if key is None:
+                missed.append(str(name))
+                continue
+            var = variables[key]
+            var.value = _coerce_variable_value(getattr(var, "typeName", None), value)
+            applied.append(f"{key}={var.value!r}")
+        print(
+            f"prepareVariables applied={applied} missed={missed} "
+            f"available={list(variables.keys())}",
+            flush=True,
         )
 
+    return prepare_variables
 
-def prepare_variables(args: StiVariablesEventArgs) -> None:
-    # 1) сначала забираем актуальные Year/Month/… из Stimulsoft (клиент — источник истины)
-    client_vars = _variable_values(args)
-    if client_vars:
-        params_update(client_vars, clear_results_on_change=True)
-    # 2) query-string / API overlay поверх
-    apply_params_to_variables(args)
+
+def _mrt_variable_list(data: dict) -> list[tuple[str, dict]]:
+    """[(key, variable_dict), ...] из Dictionary.Variables."""
+    dictionary = data.get("Dictionary") if isinstance(data, dict) else None
+    raw = dictionary.get("Variables") if isinstance(dictionary, dict) else None
+    out: list[tuple[str, dict]] = []
+    if isinstance(raw, dict):
+        for key in sorted(raw.keys(), key=lambda x: int(x) if str(x).isdigit() else str(x)):
+            var = raw[key]
+            if isinstance(var, dict):
+                out.append((str(key), var))
+    elif isinstance(raw, list):
+        for i, var in enumerate(raw):
+            if isinstance(var, dict):
+                out.append((str(i), var))
+    return out
+
+
+def _mrt_var_index(mrt_path: Path | None = None) -> dict[str, dict]:
+    """name/alias(lower) → {name, alias, type, raw} из текущего .mrt."""
+    path = mrt_path or MRT_PATH
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return {}
+    out: dict[str, dict] = {}
+    for key, var in _mrt_variable_list(data if isinstance(data, dict) else {}):
+        name = str(var.get("Name") or "").strip()
+        alias = str(var.get("Alias") or "").strip()
+        typ = str(var.get("Type") or "").strip()
+        meta = {"name": name or key, "alias": alias, "type": typ, "key": key, "raw": var}
+        if name:
+            out[name.lower()] = meta
+        if alias:
+            out[alias.lower()] = meta
+        out[str(key).lower()] = meta
+    return out
+
+
+def _normalize_filters_against_mrt(filters: dict[str, object]) -> dict[str, object]:
+    """alias→name, value под Type (StringList → list, не JSON-строка)."""
+    if not filters:
+        return {}
+    index = _mrt_var_index()
+    out: dict[str, object] = {}
+    for key, value in filters.items():
+        meta = index.get(str(key).lower())
+        name = (meta or {}).get("name") or str(key)
+        typ = (meta or {}).get("type")
+        out[name] = _coerce_variable_value(typ, value)
+    return out
+
+
+def _set_mrt_variable_value(target: dict, value: object) -> None:
+    """Записать Value в переменную .mrt в формате Stimulsoft (List = JSON array)."""
+    typ = str(target.get("Type") or "")
+    coerced = _coerce_variable_value(typ, value)
+    if typ.endswith("List") or (isinstance(coerced, list) and not typ.endswith("Range")):
+        # важно: массив в JSON, НЕ строка "[...]" — иначе карта/SQL не видят список
+        if isinstance(coerced, list):
+            target["Value"] = coerced
+        elif coerced is None:
+            target["Value"] = []
+        else:
+            target["Value"] = [coerced]
+        return
+    if typ.endswith("Range") and isinstance(coerced, dict):
+        target["Value"] = coerced
+        return
+    if isinstance(coerced, bool):
+        target["Value"] = "True" if coerced else "False"
+        return
+    if coerced is None:
+        target["Value"] = ""
+        return
+    if isinstance(coerced, (int, float)):
+        target["Value"] = str(coerced)
+        return
+    target["Value"] = str(coerced)
+
+
+def patch_mrt_for_auto_render(raw: str, filters: dict[str, object] | None) -> str:
+    """Только для /open: проставить Value фильтров, панель параметров оставить.
+
+    RequestParameters=true — иначе Stimulsoft не показывает панель фильтров.
+    Submit после загрузки жмём в JS (карта иначе без Variables/SQL).
+    """
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        return raw
+    data["RequestParameters"] = True
+    if not filters:
+        return json.dumps(data, ensure_ascii=False)
+    vars_list = _mrt_variable_list(data)
+    by_name = {
+        str(v.get("Name") or "").strip().lower(): v
+        for _, v in vars_list
+        if str(v.get("Name") or "").strip()
+    }
+    by_alias = {
+        str(v.get("Alias") or "").strip().lower(): v
+        for _, v in vars_list
+        if str(v.get("Alias") or "").strip()
+    }
+    by_key = {k: v for k, v in vars_list}
+
+    applied = []
+    missed: list[str] = []
+    for name, value in filters.items():
+        key_l = str(name).lower()
+        target = by_name.get(key_l) or by_alias.get(key_l)
+        if target is None and str(name) in by_key:
+            target = by_key[str(name)]
+        if target is None and str(name).isdigit():
+            idx = int(str(name))
+            if 0 <= idx < len(vars_list):
+                target = vars_list[idx][1]
+        if target is None:
+            missed.append(str(name))
+            continue
+        _set_mrt_variable_value(target, value)
+        applied.append(
+            f"{target.get('Name') or name}={target.get('Value')!r}"
+        )
+    print(
+        f"mrt-render patched values={applied} missed={missed} RequestParameters=True",
+        flush=True,
+    )
+    return json.dumps(data, ensure_ascii=False)
+
+
+def inject_filter_values_js(
+    html: str,
+    filters: dict[str, object] | None,
+    *,
+    auto_render: bool = False,
+) -> str:
+    """Клиентский fallback: выставить variables из __dashFilters."""
+    if not filters or not isinstance(html, str):
+        return html
+    # экранируем < чтобы JSON не закрыл <script> (Unexpected token)
+    payload = json.dumps(filters, ensure_ascii=False).replace("<", "\\u003c")
+    auto_js = "true" if auto_render else "false"
+    script = (
+        "<script>(function(){\n"
+        f"  window.__dashFilters = {payload};\n"
+        f"  window.__dashAutoRender = {auto_js};\n"
+        "  function dashApplyFilters(args){\n"
+        "    var F = window.__dashFilters || {};\n"
+        "    var vars = args && args.variables;\n"
+        "    if (!vars) return;\n"
+        "    var list = Array.isArray(vars) ? vars : null;\n"
+        "    if (list) {\n"
+        "      list.forEach(function(v, i){\n"
+        "        var n = (v && v.name != null) ? String(v.name) : '';\n"
+        "        var hit = null;\n"
+        "        Object.keys(F).forEach(function(k){\n"
+        "          if (hit != null) return;\n"
+        "          if (String(k).toLowerCase() === n.toLowerCase()) hit = F[k];\n"
+        "          else if (String(k) === String(i)) hit = F[k];\n"
+        "        });\n"
+        "        if (hit != null) { v.value = hit; try { v.valueObject = hit; } catch (e) {} }\n"
+        "      });\n"
+        "      return;\n"
+        "    }\n"
+        "    Object.keys(F).forEach(function(k){\n"
+        "      function applyOne(vv){ if (!vv) return; vv.value = F[k]; try { vv.valueObject = F[k]; } catch (e) {} }\n"
+        "      if (vars[k] != null) { applyOne(vars[k]); return; }\n"
+        "      var lk = String(k).toLowerCase();\n"
+        "      Object.keys(vars).forEach(function(name){\n"
+        "        if (String(name).toLowerCase() === lk) applyOne(vars[name]);\n"
+        "      });\n"
+        "    });\n"
+        "  }\n"
+        "  window.dashApplyFilters = dashApplyFilters;\n"
+        "})();</script>\n"
+    )
+    if "window.__dashFilters" in html:
+        return html
+    if "</head>" in html:
+        return html.replace("</head>", script + "</head>", 1)
+    if "</body>" in html:
+        return html.replace("</body>", script + "</body>", 1)
+    return html + script
+
+
+def build_viewer(
+    *,
+    filters: dict[str, object] | None = None,
+    filter_token: str | None = None,
+    inject_screenshot: bool = True,
+    auto_render: bool = False,
+    auto_shot: bool = False,
+):
+    """Собрать StiViewer.
+
+    auto_render=True — /open: сразу дашборд с фильтрами.
+    auto_shot=True — после рендера PNG + PDF таблиц в exports/ (GET /shot).
+    /viewer вызывает с auto_render=False.
+    """
+    viewer = StiViewer()
+    apply_license(viewer)
+    viewer.options.appearance.fullScreenMode = True
+    apply_filter_panel_ui(viewer.options)
+    viewer.onBeginProcessData += begin_process_data
+    # /open: панель нужна — Submit шлёт postInteraction(Variables), без этого
+    # карта остаётся без данных. Кнопку жмём сами в JS после render.
+    if filters:
+        viewer.onPrepareVariables += make_prepare_variables(filters)
+        # клиентский хук как дополнительный канал
+        viewer.onPrepareVariables += "dashApplyFilters"
+    # StiJavaScript всегда клеит `?sti_event=` к handler.url —
+    # нельзя писать `/open?rf=…` (получится `?rf=…?sti_event=` → HTML вместо JS → Unexpected token).
+    # rf остаётся в /mrt-render?rf= и в session; handler = чистый путь.
+    # /shot тоже ходит в /open (GetResource / Variables).
+    handler_path = "/open" if (auto_render or auto_shot) else "/viewer"
+    try:
+        viewer.handler._StiBaseHandler__url = handler_path  # noqa: SLF001
+    except Exception:
+        pass
+
+    # handler/GetResource — без inject: иначе JS ломается (в файле есть «StiViewer»)
+    if sti_process(viewer):
+        return sti_response(
+            viewer,
+            inject_screenshot=False,
+            filter_token=filter_token,
+            auto_render=auto_render,
+            auto_shot=auto_shot,
+            handler_path=handler_path,
+        )
+
+    report = StiReport()
+    # /open|/shot → /mrt-render?rf=…; /viewer → сырой шаблон через /mrt-render без rf
+    if (auto_render or auto_shot) and filter_token:
+        report.loadFile(f"/mrt-render?rf={filter_token}")
+    else:
+        report.loadFile("/mrt-render")
+    viewer.report = report
+    return sti_response(
+        viewer,
+        inject_screenshot=inject_screenshot,
+        filters=filters,
+        filter_token=filter_token,
+        auto_render=auto_render or auto_shot,
+        auto_shot=auto_shot,
+        handler_path=handler_path,
+    )
 
 
 def save_report(args: StiReportEventArgs):
@@ -458,111 +750,326 @@ def sti_process(component) -> bool:
     component.handler.framework = StiFrameworkType.FLASK
     component.handler.origin = request.origin or "*"
     component.handler.error = None
-    component.handler.passQueryParametersToReport = True
     return handled
 
 
-def _force_utf8(resp):
-    """Stimulsoft Flask responses often omit charset → Windows shows □□□ / Unexpected token."""
-    if resp is None or not hasattr(resp, "headers"):
-        return resp
-    mime = (getattr(resp, "mimetype", None) or "").split(";")[0].strip()
-    current = resp.headers.get("Content-Type") or mime or "text/html"
-    base = current.split(";", 1)[0].strip() or mime or "text/html"
-    resp.headers["Content-Type"] = f"{base}; charset=utf-8"
-    return resp
+def inject_screenshot_ui(
+    html: str, *, auto_render: bool = False, auto_shot: bool = False
+) -> str:
+    """Скрипт скрина (+ опц. кнопка) и window.__dashReport для bake карт."""
+    needle = "viewer.report = report;\nviewer.renderHtml('viewerContent');"
+    auto_block = ""
+    auto_submit_js = ""
+    if auto_render:
+        # Панель как в /viewer (requestParameters=true). Один Submit → Variables/SQL.
+        # После refresh Variables панель снова открываем и держим.
+        auto_block = (
+            "try { report.requestParameters = true; } catch (e) {}\n"
+            "try {\n"
+            "  var F = window.__dashFilters || {};\n"
+            "  function dashPick(name, alias){\n"
+            "    if (name != null && F[name] != null) return F[name];\n"
+            "    if (alias != null && F[alias] != null) return F[alias];\n"
+            "    var nl = String(name || '').toLowerCase();\n"
+            "    var al = String(alias || '').toLowerCase();\n"
+            "    var keys = Object.keys(F);\n"
+            "    for (var ki = 0; ki < keys.length; ki++) {\n"
+            "      var k = keys[ki];\n"
+            "      var lk = String(k).toLowerCase();\n"
+            "      if (lk === nl || (al && lk === al)) return F[k];\n"
+            "    }\n"
+            "    return null;\n"
+            "  }\n"
+            "  if (report.dictionary && report.dictionary.variables) {\n"
+            "    var vs = report.dictionary.variables;\n"
+            "    var n = vs.count || 0;\n"
+            "    for (var i = 0; i < n; i++) {\n"
+            "      var v = vs.getByIndex ? vs.getByIndex(i) : (vs.list && vs.list[i]);\n"
+            "      if (!v) continue;\n"
+            "      var hit = dashPick(v.name, v.alias);\n"
+            "      if (hit == null) continue;\n"
+            "      try { v.valueObject = hit; } catch (e1) {}\n"
+            "      try { v.value = hit; } catch (e2) {}\n"
+            "    }\n"
+            "  }\n"
+            "} catch (e) {}\n"
+        )
+        auto_submit_js = (
+            "(function(){\n"
+            "  var F = window.__dashFilters || {};\n"
+            "  var tries = 0;\n"
+            "  var submitted = false;\n"
+            "  function findParam(params, key){\n"
+            "    if (!params) return null;\n"
+            "    if (params[key]) return params[key];\n"
+            "    var lk = String(key).toLowerCase();\n"
+            "    var names = Object.keys(params);\n"
+            "    for (var i = 0; i < names.length; i++) {\n"
+            "      if (String(names[i]).toLowerCase() === lk) return params[names[i]];\n"
+            "    }\n"
+            "    return null;\n"
+            "  }\n"
+            "  function itemLabel(it){\n"
+            "    if (!it) return '';\n"
+            "    if (it.value != null && String(it.value) !== '') return String(it.value);\n"
+            "    return it.key != null ? String(it.key) : '';\n"
+            "  }\n"
+            "  function matchWant(it, wantSet){\n"
+            "    if (!it || !wantSet) return false;\n"
+            "    var k = it.key != null ? String(it.key) : '';\n"
+            "    var v = it.value != null ? String(it.value) : '';\n"
+            "    return !!(wantSet[k] || (v && wantSet[v]));\n"
+            "  }\n"
+            "  function wantSetOf(raw){\n"
+            "    var arr = Array.isArray(raw) ? raw : (raw == null ? [] : [raw]);\n"
+            "    var out = {};\n"
+            "    for (var i = 0; i < arr.length; i++) out[String(arr[i])] = true;\n"
+            "    return out;\n"
+            "  }\n"
+            "  function refreshListLabels(p){\n"
+            "    try {\n"
+            "      if (p.menu && typeof p.menu.updateParameterValue === 'function') {\n"
+            "        p.menu.updateParameterValue();\n"
+            "        return;\n"
+            "      }\n"
+            "    } catch (e0) {}\n"
+            "    try {\n"
+            "      var box = p.controls && p.controls.firstTextBox;\n"
+            "      var items = p.params && p.params.items;\n"
+            "      if (!box || !items) return;\n"
+            "      var parts = [];\n"
+            "      var keys = Object.keys(items);\n"
+            "      for (var i = 0; i < keys.length; i++) {\n"
+            "        var it = items[keys[i]];\n"
+            "        if (!it || !it.isChecked) continue;\n"
+            "        parts.push(itemLabel(it));\n"
+            "        if (parts.length >= 30) break;\n"
+            "      }\n"
+            "      box.value = parts.join('; ');\n"
+            "    } catch (e1) {}\n"
+            "  }\n"
+            "  function applyParamValue(p, raw){\n"
+            "    if (!p || !p.params) return;\n"
+            "    var basic = String(p.params.basicType || '');\n"
+            "    var items = p.params.items;\n"
+            "    if (basic === 'List' && items) {\n"
+            "      var want = wantSetOf(raw);\n"
+            "      var keys = Object.keys(items);\n"
+            "      for (var i = 0; i < keys.length; i++) {\n"
+            "        var it = items[keys[i]];\n"
+            "        var on = matchWant(it, want);\n"
+            "        try { it.isChecked = on; } catch (e2) {}\n"
+            "        try {\n"
+            "          if (p.menu && p.menu.paramsItems && p.menu.paramsItems[i] &&\n"
+            "              p.menu.paramsItems[i].checkBox &&\n"
+            "              typeof p.menu.paramsItems[i].checkBox.setChecked === 'function') {\n"
+            "            p.menu.paramsItems[i].checkBox.setChecked(on);\n"
+            "          }\n"
+            "        } catch (e3) {}\n"
+            "      }\n"
+            "      refreshListLabels(p);\n"
+            "      return;\n"
+            "    }\n"
+            "    if (items) {\n"
+            "      var one = Array.isArray(raw) ? raw[0] : raw;\n"
+            "      var key = one;\n"
+            "      var label = one != null ? String(one) : '';\n"
+            "      var ikeys = Object.keys(items);\n"
+            "      for (var j = 0; j < ikeys.length; j++) {\n"
+            "        var it2 = items[ikeys[j]];\n"
+            "        if (!it2) continue;\n"
+            "        if (String(it2.key) === String(one) || String(it2.value) === String(one)) {\n"
+            "          key = it2.key;\n"
+            "          label = itemLabel(it2);\n"
+            "          break;\n"
+            "        }\n"
+            "      }\n"
+            "      try { p.params.key = key; } catch (e4) {}\n"
+            "      try {\n"
+            "        if (p.controls && p.controls.firstTextBox) p.controls.firstTextBox.value = label;\n"
+            "      } catch (e5) {}\n"
+            "      return;\n"
+            "    }\n"
+            "    try { if (typeof p.setValue === 'function') p.setValue(raw); } catch (e6) {}\n"
+            "  }\n"
+            "  function keepFiltersOpen(js){\n"
+            "    try {\n"
+            "      var panel = js && js.controls && js.controls.parametersPanel;\n"
+            "      if (!panel) return;\n"
+            "      if (typeof panel.changeVisibleState === 'function') panel.changeVisibleState(true);\n"
+            "      var btn = js.controls && js.controls.buttons && js.controls.buttons.Parameters;\n"
+            "      if (btn) {\n"
+            "        try { btn.isSelected = true; } catch (e0) {}\n"
+            "        try { if (typeof btn.setSelected === 'function') btn.setSelected(true); } catch (e1) {}\n"
+            "      }\n"
+            "    } catch (e) {}\n"
+            "  }\n"
+            "  function tick(){\n"
+            "    tries++;\n"
+            "    var viewer = window.__dashViewer || window.viewer;\n"
+            "    var js = viewer && viewer.jsObject;\n"
+            "    if (!js) { if (tries < 100) return; clearInterval(timer); return; }\n"
+            "    var panel = js.controls && js.controls.parametersPanel;\n"
+            "    keepFiltersOpen(js);\n"
+            "    if (!panel) { if (tries < 100) return; clearInterval(timer); return; }\n"
+            "    var params = js.options && js.options.parameters;\n"
+            "    if (!submitted) {\n"
+            "      var ready = params && Object.keys(params).length;\n"
+            "      if (!ready && tries < 40) return;\n"
+            "      if (params) {\n"
+            "        if (F && Object.keys(F).length) {\n"
+            "          Object.keys(F).forEach(function(k){\n"
+            "            var p = findParam(params, k);\n"
+            "            if (!p) return;\n"
+            "            applyParamValue(p, F[k]);\n"
+            "          });\n"
+            "        }\n"
+            "        // allowUserValues иначе рисует keys — перерисовать подписи values\n"
+            "        Object.keys(params).forEach(function(n){\n"
+            "          var p = params[n];\n"
+            "          if (p && p.params && p.params.basicType === 'List') refreshListLabels(p);\n"
+            "        });\n"
+            "      }\n"
+            "      submitted = true;\n"
+            "      try {\n"
+            "        if (typeof js.Action === 'function') js.Action('Submit');\n"
+            "        else if (panel.mainButtons && panel.mainButtons.submit &&\n"
+            "                 typeof panel.mainButtons.submit.action === 'function') {\n"
+            "          panel.mainButtons.submit.action();\n"
+            "        }\n"
+            "      } catch (e2) {}\n"
+            "    }\n"
+            "    keepFiltersOpen(js);\n"
+            "    if (params) {\n"
+            "      Object.keys(params).forEach(function(n){\n"
+            "        var p = params[n];\n"
+            "        if (p && p.params && p.params.basicType === 'List') refreshListLabels(p);\n"
+            "      });\n"
+            "    }\n"
+            "    if (tries > 40) clearInterval(timer);\n"
+            "  }\n"
+            "  var timer = setInterval(tick, 250);\n"
+            "  setTimeout(tick, 0);\n"
+            "})();\n"
+        )
+    repl = (
+        auto_block
+        + "viewer.report = report;\n"
+        f"try {{ report.parameterWidth = {filter_param_width()}; }} catch (ePw) {{}}\n"
+        "window.__dashViewer = viewer;\n"
+        "window.__dashReport = report;\n"
+        "window.viewer = viewer;\n"
+        "viewer.renderHtml('viewerContent');\n"
+        + auto_submit_js
+    )
+    if needle in html:
+        html = html.replace(needle, repl, 1)
+    try:
+        ver = int((ROOT / "screenshot_dashboard.js").stat().st_mtime)
+    except OSError:
+        ver = 1
+    show_btn = (os.environ.get("SHOT_SHOW_BUTTON") or "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    flag_parts = []
+    if show_btn:
+        flag_parts.append("window.__dashShowShotButton=true;")
+    if auto_shot:
+        flag_parts.append("window.__dashAutoShot=true;")
+    flags = (
+        f"<script>{''.join(flag_parts)}</script>\n" if flag_parts else ""
+    )
+    tag = flags + f'<script src="/screenshot-dashboard.js?v={ver}"></script>\n'
+    if "screenshot-dashboard.js" not in html:
+        if "</body>" in html:
+            html = html.replace("</body>", tag + "</body>", 1)
+        else:
+            html = html + tag
+    return html
 
 
-def sti_response(component, inject_debug: bool = False):
+def inject_handler_url(
+    html: str,
+    filter_token: str | None = None,
+    *,
+    handler_path: str = "/open",
+) -> str:
+    """Прописать Stimulsoft.handler.url = чистый путь (без ?rf=)."""
+    if not isinstance(html, str):
+        return html
+    # filter_token специально не в URL — см. build_viewer
+    url = handler_path or "/open"
+    script = (
+        "<script>(function(){\n"
+        f"  var u = {json.dumps(url)};\n"
+        "  function apply(){\n"
+        "    try {\n"
+        "      if (window.Stimulsoft && Stimulsoft.handler) Stimulsoft.handler.url = u;\n"
+        "    } catch (e) {}\n"
+        "  }\n"
+        "  apply();\n"
+        "  document.addEventListener('DOMContentLoaded', apply);\n"
+        "})();</script>\n"
+    )
+    if "window.__dashHandlerUrl" in html:
+        return html
+    script = script.replace(
+        "var u = ",
+        "window.__dashHandlerUrl = true; var u = ",
+        1,
+    )
+    if "</head>" in html:
+        return html.replace("</head>", script + "</head>", 1)
+    if "</body>" in html:
+        return html.replace("</body>", script + "</body>", 1)
+    return html + script
+
+
+def sti_response(
+    component,
+    inject_screenshot: bool = False,
+    filters: dict[str, object] | None = None,
+    filter_token: str | None = None,
+    auto_render: bool = False,
+    auto_shot: bool = False,
+    handler_path: str = "/open",
+):
     component.handler.framework = StiFrameworkType.FLASK
-    component.handler.passQueryParametersToReport = True
     if not component.handler.origin:
         component.handler.origin = request.origin or "*"
     resp = component.getFrameworkResponse()
-    if inject_debug and hasattr(resp, "get_data") and hasattr(resp, "set_data"):
-        # decode as utf-8 explicitly (not latin-1) so Cyrillic in MRT stays intact
-        raw = resp.get_data()
-        html = raw.decode("utf-8", errors="replace")
-        # inline script: avoids Windows encoding breakage of a separate .js fetch.
-        # NOTE: do NOT key off "dashCaptureInteraction" — Stimulsoft already emits that name
-        # from onInteraction += "dashCaptureInteraction" even when our script is missing.
-        marker = "/* stimulsoft-llm-pack-debug */"
-        if marker not in html:
-            if "<meta charset=" not in html.lower():
-                html = html.replace(
-                    "<head>",
-                    '<head><meta charset="utf-8">',
-                    1,
-                )
-            js = _load_debug_js()
-            tag = (
-                "<script type=\"text/javascript\">\n"
-                + marker
-                + "\n"
-                + js
-                + "\n</script>\n"
+    # GetResource/handler: inject_screenshot=False — иначе ломаем JS
+    # (в бандлах есть «viewerContent»/«StiViewer»).
+    if inject_screenshot and hasattr(resp, "get_data") and hasattr(resp, "set_data"):
+        raw = resp.get_data(as_text=True)
+        if isinstance(raw, str) and ("viewerContent" in raw or "StiViewer" in raw):
+            # сначала __dashFilters, потом патч renderHtml (auto_render)
+            html = inject_filter_values_js(raw, filters, auto_render=auto_render)
+            html = inject_screenshot_ui(
+                html, auto_render=auto_render, auto_shot=auto_shot
             )
-            if "</head>" in html:
-                html = html.replace("</head>", tag + "</head>", 1)
-            elif "</body>" in html:
-                html = html.replace("</body>", tag + "</body>", 1)
-            else:
-                html = html + tag
-            resp.set_data(html.encode("utf-8"))
-    return _force_utf8(resp)
+            html = inject_handler_url(html, filter_token, handler_path=handler_path)
+            html = inject_filter_panel_layout(html)
+            resp.set_data(html)
+            resp.mimetype = "text/html"
+    return resp
 
 
-def remember_interaction(dump: Any) -> None:
-    global _LAST_INTERACTION, _DRILL_STACK, _APPLY_FILTERS
-    if not isinstance(dump, dict):
-        dump = {"raw": dump}
-    dump = enrich_interaction(dump) or dump
-    with _params_lock:
-        _APPLY_FILTERS, _DRILL_STACK, flat = update_filter_state(
-            _APPLY_FILTERS, _DRILL_STACK, dump
-        )
-        dump = dict(dump)
-        dump["drill_level"] = len(_DRILL_STACK)
-        dump["apply_filter_count"] = len(_APPLY_FILTERS)
-        if flat:
-            dump["dashboard_filters"] = flat
-        _LAST_INTERACTION = dump
-        _INTERACTIONS.append(dump)
-        overflow = len(_INTERACTIONS) - _INTERACTIONS_MAX
-        if overflow > 0:
-            del _INTERACTIONS[:overflow]
-    action = dump.get("action")
-    button = dump.get("button")
-    rules = dump.get("dashboard_filters") or []
-    print(
-        f"[interaction] action={action!r} button={button!r} "
-        f"drill_level={dump.get('drill_level')} "
-        f"apply={dump.get('apply_filter_count')} filters={len(rules)} "
-        f"keys={dump.get('__keys')}",
-        flush=True,
-    )
-
-
-def wire_viewer(viewer: StiViewer) -> None:
-    apply_license(viewer)
-    viewer.options.appearance.fullScreenMode = True
-    viewer.handler.passQueryParametersToReport = True
-    viewer.onBeginProcessData += begin_process_data
-    viewer.onEndProcessData += end_process_data
-    viewer.onPrepareVariables += prepare_variables
-    # alnum → вызов window.dashCaptureInteraction(args) из dash_debug.js
-    viewer.onInteraction += "dashCaptureInteraction"
-
-
-def wire_designer(designer: StiDesigner) -> None:
-    apply_license(designer)
-    designer.options.appearance.fullScreenMode = True
-    designer.handler.passQueryParametersToReport = True
-    designer.onBeginProcessData += begin_process_data
-    designer.onEndProcessData += end_process_data
-    designer.onPrepareVariables += prepare_variables
-    designer.onSaveReport += save_report
-    designer.onSaveAsReport += save_report
+def _safe_name(name: str, fallback: str = "dashboard.png", ext: str | None = None) -> str:
+    raw = (name or "").strip() or fallback
+    base = Path(raw).name
+    cleaned = _SAFE_NAME.sub("_", base).strip("._") or fallback
+    allowed = {".png", ".csv", ".json", ".txt", ".html", ".pdf"}
+    suffix = Path(cleaned).suffix.lower()
+    want = ("." + ext.lstrip(".")).lower() if ext else ""
+    if want in allowed and not cleaned.lower().endswith(want):
+        cleaned = Path(cleaned).stem + want
+    elif suffix not in allowed:
+        cleaned += want if want in allowed else ".png"
+    return cleaned[:160]
 
 
 @app.get("/favicon.ico")
@@ -570,277 +1077,469 @@ def favicon():
     return Response(status=204)
 
 
-@app.get("/dash-debug.js")
-def dash_debug_js():
-    resp = Response(
-        _load_debug_js().encode("utf-8"),
-        mimetype="application/javascript; charset=utf-8",
-    )
+def openapi_spec() -> dict:
+    """OpenAPI 3 для Flask viewer — /docs."""
+    return {
+        "openapi": "3.0.3",
+        "info": {
+            "title": "Stimulsoft Viewer API",
+            "version": "1.0.0",
+            "description": (
+                "`/viewer` — preview (панель + Submit). "
+                "`/open` — передал фильтры → сразу готовый дашборд. "
+                f"MRT: `{MRT_PATH.name}`"
+            ),
+        },
+        "paths": {
+            "/filters": {
+                "get": {
+                    "tags": ["filters"],
+                    "summary": "Список фильтров из .mrt (+ SQL choices)",
+                    "description": (
+                        "Variables с Category «Фильтр(ы)». "
+                        "`choices_from=items` — Keys/Values; "
+                        "`choices_from=query` — SqlCommand DataSource (по умолчанию выполняется)."
+                    ),
+                    "parameters": [
+                        {
+                            "name": "run_queries",
+                            "in": "query",
+                            "schema": {
+                                "type": "string",
+                                "enum": ["0", "1", "true", "false"],
+                                "default": "1",
+                            },
+                            "description": "1 — выполнить SQL dialog.source; 0 — только метаданные",
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Фильтры",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/FiltersResponse"}
+                                }
+                            },
+                        }
+                    },
+                }
+            },
+            "/open": {
+                "get": {
+                    "tags": ["open"],
+                    "summary": "Открыть дашборд уже с фильтрами",
+                    "description": "Сразу построенный дашборд, без Submit. /viewer не меняется.",
+                    "parameters": [
+                        {
+                            "name": "filters",
+                            "in": "query",
+                            "schema": {"type": "string"},
+                            "description": 'JSON: {"trendtype":"nocumulative","typenum":1000}',
+                        },
+                        {
+                            "name": "trendtype",
+                            "in": "query",
+                            "schema": {"type": "string"},
+                            "description": "Имена variables из GET /filters",
+                        },
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "HTML дашборда с фильтрами",
+                            "content": {"text/html": {"schema": {"type": "string"}}},
+                        }
+                    },
+                },
+                "post": {
+                    "tags": ["open"],
+                    "summary": "Передать фильтры и открыть дашборд",
+                    "description": (
+                        "Открывает браузер на /open (без токена). "
+                        "Accept: application/json → {ok,url,filters}. ?open=0 — без браузера."
+                    ),
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/RenderRequest"},
+                                "examples": {
+                                    "wrapped": {
+                                        "summary": "через filters",
+                                        "value": {
+                                            "filters": {
+                                                "trendtype": "nocumulative",
+                                                "typenum": 1000,
+                                            }
+                                        },
+                                    },
+                                    "flat": {
+                                        "summary": "плоский объект",
+                                        "value": {
+                                            "trendtype": "nocumulative",
+                                            "typenum": 1000,
+                                        },
+                                    },
+                                },
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "HTML-редирект или JSON {url}",
+                            "content": {
+                                "text/html": {"schema": {"type": "string"}},
+                                "application/json": {"schema": {"type": "object"}},
+                            },
+                        }
+                    },
+                },
+            },
+            "/viewer": {
+                "get": {
+                    "tags": ["viewer"],
+                    "summary": "Preview: панель + ручной Submit",
+                    "responses": {
+                        "200": {
+                            "description": "HTML Stimulsoft Viewer без авто-фильтров",
+                            "content": {"text/html": {"schema": {"type": "string"}}},
+                        }
+                    },
+                }
+            },
+            "/designer": {
+                "get": {
+                    "tags": ["viewer"],
+                    "summary": "Stimulsoft Designer",
+                    "responses": {
+                        "200": {
+                            "description": "HTML Designer",
+                            "content": {"text/html": {"schema": {"type": "string"}}},
+                        }
+                    },
+                }
+            },
+            "/api/screenshot": {
+                "post": {
+                    "tags": ["export"],
+                    "summary": "Сохранить PNG/PDF/CSV в exports/",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/ScreenshotRequest"}
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Сохранено",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/ScreenshotResponse"}
+                                }
+                            },
+                        }
+                    },
+                }
+            },
+            "/shot": {
+                "get": {
+                    "tags": ["export"],
+                    "summary": "Сигнал открытому /open: скрин + download (без reload, без токена)",
+                    "description": (
+                        "Держи /open в браузере. GET /shot — общий сигнал любой вкладке, "
+                        "токен не нужен. Дашборд не перезагружается."
+                    ),
+                    "responses": {
+                        "200": {
+                            "description": "ok + files (png/pdfs)",
+                            "content": {"application/json": {"schema": {"type": "object"}}},
+                        },
+                        "504": {
+                            "description": "таймаут — нет открытого /open",
+                            "content": {"application/json": {"schema": {"type": "object"}}},
+                        },
+                    },
+                }
+            },
+        },
+        "components": {
+            "schemas": {
+                "FiltersResponse": {
+                    "type": "object",
+                    "properties": {
+                        "mrt": {"type": "string"},
+                        "kind": {"type": "string", "example": "category_filters"},
+                        "count": {"type": "integer"},
+                        "run_queries": {"type": "boolean"},
+                        "database": {"type": "boolean"},
+                        "filters": {
+                            "type": "array",
+                            "items": {"$ref": "#/components/schemas/FilterItem"},
+                        },
+                    },
+                },
+                "FilterItem": {
+                    "type": "object",
+                    "properties": {
+                        "index": {"type": "integer"},
+                        "name": {"type": "string"},
+                        "alias": {"type": "string"},
+                        "category": {"type": "string", "example": "Фильтры"},
+                        "type": {"type": "string"},
+                        "choices_from": {
+                            "type": "string",
+                            "enum": ["items", "query", "none"],
+                        },
+                        "choices": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "key": {},
+                                    "value": {},
+                                },
+                            },
+                        },
+                        "sql": {"type": "string"},
+                        "query_ok": {"type": "boolean"},
+                        "query_error": {"type": "string"},
+                    },
+                },
+                "RenderRequest": {
+                    "type": "object",
+                    "description": "Либо {filters:{...}}, либо плоский {Name: value}",
+                    "additionalProperties": True,
+                    "properties": {
+                        "filters": {
+                            "type": "object",
+                            "additionalProperties": True,
+                            "example": {"Region": "Брестская", "Year": 2024},
+                        }
+                    },
+                },
+                "ScreenshotRequest": {
+                    "type": "object",
+                    "required": ["data_b64"],
+                    "properties": {
+                        "name": {"type": "string"},
+                        "ext": {"type": "string", "example": "png"},
+                        "data_b64": {"type": "string", "format": "byte"},
+                    },
+                },
+                "ScreenshotResponse": {
+                    "type": "object",
+                    "properties": {
+                        "ok": {"type": "boolean"},
+                        "name": {"type": "string"},
+                        "path": {"type": "string"},
+                        "error": {"type": "string"},
+                    },
+                },
+            }
+        },
+    }
+
+
+@app.get("/openapi.json")
+def openapi_json():
+    resp = jsonify(openapi_spec())
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
 
-@app.get("/api/params")
-def get_params():
-    with _params_lock:
+@app.get("/docs")
+def swagger_docs():
+    """Swagger UI для viewer API."""
+    html = """<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"/>
+  <title>Stimulsoft Viewer API</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css"/>
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script>
+    SwaggerUIBundle({
+      url: "/openapi.json",
+      dom_id: "#swagger-ui",
+      deepLinking: true,
+      presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
+      layout: "BaseLayout"
+    });
+  </script>
+</body>
+</html>
+"""
+    return Response(html, mimetype="text/html; charset=utf-8")
+
+
+@app.get("/screenshot-dashboard.js")
+def screenshot_dashboard_js():
+    path = ROOT / "screenshot_dashboard.js"
+    resp = Response(path.read_text(encoding="utf-8"), mimetype="application/javascript; charset=utf-8")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.get("/filters")
+def filters():
+    """Variables с Category «Фильтр(ы)»: items или SQL dialog.source (SQL считается по умолчанию)."""
+    try:
+        from filters_mrt import extract_filters
+
+        # по умолчанию SQL выполняется; ?run_queries=0 — только метаданные
+        rq = (request.args.get("run_queries") or request.args.get("sql") or "1").strip().lower()
+        run_queries = rq not in {"0", "false", "no", "off"}
+        plan = extract_filters(
+            MRT_PATH,
+            run_queries=run_queries,
+            database_url=_db or None,
+        )
+    except Exception as exc:
         return jsonify(
             {
-                "params": dict(_PARAMS),
-                "interaction": _LAST_INTERACTION,
-                "interactions_count": len(_INTERACTIONS),
-                "results_count": len(_RESULTS),
+                "mrt": MRT_PATH.name,
+                "kind": "category_filters",
+                "error": str(exc),
+                "count": 0,
+                "filters": [],
             }
-        )
+        ), 500
+    resp = jsonify(plan)
+    resp.headers["Cache-Control"] = "no-store"
+    if plan.get("mrt_stripped"):
+        return resp, 422
+    return resp
 
 
-@app.get("/api/interactions")
-def get_interactions():
-    with _params_lock:
-        return jsonify({"interactions": list(_INTERACTIONS)})
-
-
-@app.get("/api/llm-pack")
-def get_llm_pack():
-    """filters + interaction + results всех датасорсов — без SQL/логики MRT."""
-    body = dumps_llm_pack(llm_pack_snapshot())
-    return Response(body.encode("utf-8"), content_type="application/json; charset=utf-8")
-
-
-@app.get("/api/llm-pack-digest")
-def get_llm_pack_digest():
-    """Короткий текст по viewport-таблицам."""
-    text = build_results_digest(
-        llm_pack_snapshot().get("results") or {}, max_rows_per_source=8
-    )
-    return Response(text.encode("utf-8"), content_type="text/plain; charset=utf-8")
-
-
-@app.get("/api/compare")
-def get_compare():
-    """SVERKA: viewport only (what is drawn on the dashboard)."""
-    text = build_viewport_compare_text(llm_pack_snapshot(), max_rows=15)
-    return Response(text.encode("utf-8"), content_type="text/plain; charset=utf-8")
-
-
-@app.get("/api/structure")
-def get_structure_json():
-    """Inventory of element names/types (no table row dump)."""
-    with _params_lock:
-        vp = dict(_VIEWPORT) if isinstance(_VIEWPORT, dict) else {}
-    body = dumps_llm_pack(structure_from_viewport(vp))
-    return Response(body.encode("utf-8"), content_type="application/json; charset=utf-8")
-
-
-@app.get("/api/structure-text")
-def get_structure_text():
-    with _params_lock:
-        vp = dict(_VIEWPORT) if isinstance(_VIEWPORT, dict) else {}
-    text = build_structure_text(structure_from_viewport(vp))
-    return Response(text.encode("utf-8"), content_type="text/plain; charset=utf-8")
-
-
-@app.get("/structure")
-def structure_page():
-    """Photographable page: all block/button names for the agent."""
-    return Response(STRUCTURE_PAGE_HTML.encode("utf-8"), content_type="text/html; charset=utf-8")
-
-
-@app.get("/api/atlas")
-def get_atlas_json():
-    with _params_lock:
-        atlas = dict(_ATLAS) if isinstance(_ATLAS, dict) else {"pages": []}
-    return Response(
-        dumps_llm_pack(normalize_atlas(atlas)).encode("utf-8"),
-        content_type="application/json; charset=utf-8",
-    )
-
-
-@app.get("/api/atlas-text")
-def get_atlas_text():
-    with _params_lock:
-        atlas = dict(_ATLAS) if isinstance(_ATLAS, dict) else {"pages": []}
-    text = build_atlas_text(atlas)
-    return Response(text.encode("utf-8"), content_type="text/plain; charset=utf-8")
-
-
-@app.post("/api/atlas")
-def post_atlas():
-    global _ATLAS
-    body = request.get_json(silent=True) if request.is_json else None
-    if not isinstance(body, dict):
-        return Response("need JSON atlas object", status=400)
-    with _params_lock:
-        _ATLAS = apply_atlas_post(_ATLAS, body)
-        out = dict(_ATLAS)
-    return Response(
-        dumps_llm_pack({"ok": True, "atlas": normalize_atlas(out)}).encode("utf-8"),
-        content_type="application/json; charset=utf-8",
-    )
-
-
-@app.get("/atlas")
-def atlas_page():
-    """Multi-page + manual scenario inventory for the agent."""
-    return Response(ATLAS_PAGE_HTML.encode("utf-8"), content_type="text/html; charset=utf-8")
-
-
-@app.get("/api/verify")
-def get_verify():
-    """Техпроверка свежести SQL (НЕ данные для сверки с экраном)."""
-    body = dumps_llm_pack(verify_snapshot())
-    return Response(body.encode("utf-8"), content_type="application/json; charset=utf-8")
-
-
-@app.get("/api/debug/sql-snapshot")
-def get_debug_sql_snapshot():
-    """Optional debug: raw onEndProcessData rows (NOT for LLM)."""
-    with _params_lock:
-        body = dumps_llm_pack(
-            {"results_source": "sql_snapshot_debug", "results": dict(_RESULTS)}
-        )
-    return Response(body.encode("utf-8"), content_type="application/json; charset=utf-8")
-
-
-@app.post("/api/viewport")
-def post_viewport():
-    """Replace full visible-dashboard snapshot from the browser."""
-    global _VIEWPORT
-    body = request.get_json(silent=True) if request.is_json else None
-    if not isinstance(body, dict):
-        return Response('need JSON viewport object', status=400)
-    vp = normalize_viewport(body)
-    # remember interaction if embedded
-    if isinstance(body.get("interaction"), dict):
-        remember_interaction(body["interaction"])
-    with _params_lock:
-        _VIEWPORT = vp
-    pack = llm_pack_snapshot()
-    return Response(
-        dumps_llm_pack({"ok": True, "llm_pack": pack}).encode("utf-8"),
-        content_type="application/json; charset=utf-8",
-    )
-
-
-@app.post("/api/ask")
-def post_ask():
-    """Parse a sentence into panel filters and a pending region drill. Model stays off."""
-    body = request.get_json(silent=True) if request.is_json else None
-    if not isinstance(body, dict):
-        return Response("need JSON object", status=400)
-    text = body.get("text")
-    if not isinstance(text, str) or not text.strip():
-        return Response("need text", status=400)
-    model_text = body.get("model_text")
-    if model_text is not None and not isinstance(model_text, str):
-        return Response("model_text must be a string", status=400)
-    plan = plan_ask(text, model_text=model_text)
-    if plan["params"]:
-        params_update(plan["params"], clear_results_on_change=True)
-    return jsonify({"ok": True, "ready": False, **plan})
-
-
-@app.post("/api/query")
-def post_query():
-    """Set year, month, and money type. Same values open /viewer. No dashboard JSON yet."""
-    body = request.get_json(silent=True) if request.is_json else None
-    if not isinstance(body, dict):
-        body = _body_params()
+@app.post("/api/screenshot")
+def api_screenshot():
+    """Сохраняет PNG/CSV (и др.) из viewer в EXPORT_DIR."""
+    body = request.get_json(silent=True) or {}
+    b64 = body.get("data_b64")
+    if not isinstance(b64, str) or not b64.strip():
+        return jsonify({"ok": False, "error": "data_b64 required"}), 400
     try:
-        filters = filters_from_body(body)
-    except QueryFilterError as exc:
-        return Response(str(exc), status=400)
-    updated = params_update(filters, clear_results_on_change=True)
-    kept = {key: str(updated[key]) for key in filters if key in updated}
-    return jsonify(
-        {
-            "ok": True,
-            "params": kept,
-            "viewer": viewer_path(kept),
-            "ready": False,
-        }
+        data = base64.b64decode(b64, validate=False)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"bad base64: {exc}"}), 400
+    if not data:
+        return jsonify({"ok": False, "error": "empty payload"}), 400
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    name = _safe_name(
+        str(body.get("name") or ""),
+        f"{MRT_PATH.stem}_{stamp}.png",
+        str(body.get("ext") or "") or None,
     )
+    out = EXPORT_DIR / name
+    try:
+        out.write_bytes(data)
+    except OSError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    print(f"screenshot saved: {out.resolve()}", flush=True)
+    return jsonify({"ok": True, "name": out.name, "path": str(out.resolve())})
 
 
-@app.post("/api/params")
-def post_params():
-    incoming = _body_params()
-    incoming.update(_public_query_params())
-    body = request.get_json(silent=True) if request.is_json else None
-    if isinstance(body, dict) and body.get("interaction") is not None:
-        remember_interaction(body.get("interaction"))
-    # Do NOT clear viewport on map clicks — client will POST /api/viewport after repaint.
-    updated = params_update(incoming, clear_results_on_change=False)
-    pack = llm_pack_snapshot()
-    return Response(
-        dumps_llm_pack(
-            {"ok": True, "params": sanitize_filters(updated), "llm_pack": pack}
-        ).encode("utf-8"),
-        content_type="application/json; charset=utf-8",
-    )
+# Общий сигнал: GET /shot без параметров → любая открытая вкладка /open|/viewer
+_SHOT_GLOBAL_KEY = "*"
 
 
-@app.delete("/api/params")
-def clear_params():
-    global _LAST_INTERACTION, _FILTERS_UPDATED_AT, _FILTER_GEN, _DRILL_STACK, _APPLY_FILTERS
-    global _VIEWPORT
-    with _params_lock:
-        _PARAMS.clear()
-        _LAST_INTERACTION = None
-        _INTERACTIONS.clear()
-        _RESULTS.clear()
-        _VIEWPORT = None
-        _APPLIED_LOG.clear()
-        _PENDING_APPLY.clear()
-        _DRILL_STACK = []
-        _APPLY_FILTERS = []
-        _FILTERS_UPDATED_AT = None
-        _FILTER_GEN += 1
-    return jsonify({"ok": True, "params": {}, "llm_pack": llm_pack_snapshot()})
+def _shot_wait_ms() -> int:
+    raw = (os.environ.get("SHOT_WAIT_MS") or "90000").strip() or "90000"
+    try:
+        return max(5000, int(raw))
+    except ValueError:
+        return 90000
 
 
-@app.post("/api/smoke-seed")
-def smoke_seed():
-    """Local-only: inject a viewport without DB/MRT. Requires ALLOW_SMOKE_SEED=1."""
-    global _VIEWPORT
-    if os.environ.get("ALLOW_SMOKE_SEED", "").lower() not in {"1", "true", "yes"}:
-        return Response("smoke seed disabled", status=404)
-    body = request.get_json(silent=True) if request.is_json else None
+@app.get("/api/shot-poll")
+def api_shot_poll():
+    """Long-poll: ждёт сигнал GET /shot до ~25с (без спама каждые 0.8с)."""
+    deadline = time.time() + 25.0
+    while time.time() < deadline:
+        with _SHOT_LOCK:
+            if _SHOT_GLOBAL_KEY in _SHOT_PENDING:
+                _SHOT_PENDING.pop(_SHOT_GLOBAL_KEY, None)
+                return jsonify({"shoot": True})
+        time.sleep(0.1)
+    return jsonify({"shoot": False})
+
+
+@app.post("/api/shot-done")
+def api_shot_done():
+    """Вкладка отдала результат скрина на GET /shot."""
+    body = request.get_json(silent=True) or {}
     if not isinstance(body, dict):
-        return Response("need JSON viewport or {viewport|results}", status=400)
-    raw = body.get("viewport") if isinstance(body.get("viewport"), dict) else body
-    # legacy: {results: {name: payload}} → synthetic viewport tables
-    if isinstance(body.get("results"), dict) and "elements" not in raw:
-        elements = []
-        for name, payload in body["results"].items():
-            if not isinstance(payload, dict):
-                continue
-            elements.append(
-                {
-                    "name": str(name),
-                    "type": "StiTableElement",
-                    "columns": list(payload.get("columns") or []),
-                    "rows": list(payload.get("rows") or []),
-                    "row_count": int(
-                        payload.get("row_count") or len(payload.get("rows") or [])
-                    ),
-                }
-            )
-        raw = {
-            "captured_at": "smoke",
-            "filters": body.get("filters")
-            or {"panel": {}, "dashboard": body.get("dashboard_filters") or []},
-            "interaction": body.get("interaction"),
-            "elements": elements,
-        }
-    vp = normalize_viewport(raw)
-    with _params_lock:
-        _VIEWPORT = vp
-    return jsonify({"ok": True, "elements": len(vp.get("elements") or [])})
+        body = {"ok": False, "error": "bad body"}
+    with _SHOT_LOCK:
+        _SHOT_RESULTS[_SHOT_GLOBAL_KEY] = body
+    return jsonify({"ok": True})
 
-@app.route("/mrt", methods=["GET", "POST"])
-def serve_mrt():
+
+@app.get("/shot")
+def api_shot():
+    """Сигнал любой открытой вкладке /open: скрин + download, без токена и без reload.
+
+    1) Браузер: /open?...  (вкладка остаётся открытой)
+    2) GET /shot           → вкладка снимает PNG/PDF и скачивает
+    """
+    key = _SHOT_GLOBAL_KEY
+    with _SHOT_LOCK:
+        _SHOT_PENDING[key] = time.time()
+        _SHOT_RESULTS.pop(key, None)
+    print("shot signal (global)", flush=True)
+
+    deadline = time.time() + (_shot_wait_ms() / 1000.0)
+    result: dict[str, object] | None = None
+    while time.time() < deadline:
+        with _SHOT_LOCK:
+            if key in _SHOT_RESULTS:
+                result = _SHOT_RESULTS.pop(key)
+                break
+        time.sleep(0.15)
+
+    if result is None:
+        with _SHOT_LOCK:
+            _SHOT_PENDING.pop(key, None)
+        return jsonify(
+            {
+                "ok": False,
+                "error": "timeout: открой /open в браузере и повтори GET /shot",
+            }
+        ), 504
+
+    ok = bool(result.get("ok"))
+    payload = {
+        "ok": ok,
+        "png": result.get("png"),
+        "pdfs": result.get("pdfs") or [],
+        "files": result.get("files") or [],
+        "error": result.get("error"),
+        "exports": str(EXPORT_DIR.resolve()),
+    }
+    return jsonify(payload), (200 if ok else 500)
+
+
+@app.route("/mrt-render", methods=["GET", "POST"])
+def serve_mrt_render():
+    """Шаблон: Value фильтров из session/LATEST (или legacy ?rf=). Без фильтров — сырой .mrt."""
+    token = (request.args.get("rf") or "").strip() or None
     raw = MRT_PATH.read_text(encoding="utf-8-sig")
-    resp = Response(raw, mimetype="application/json; charset=utf-8")
+    filters = _resolve_filters(token) or {}
+    if not filters:
+        resp = Response(raw, mimetype="application/json; charset=utf-8")
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+    try:
+        patched = patch_mrt_for_auto_render(raw, filters)
+    except Exception as exc:
+        print(f"mrt-render patch failed: {exc}", flush=True)
+        patched = raw
+    resp = Response(patched, mimetype="application/json; charset=utf-8")
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -849,58 +1548,167 @@ def serve_mrt():
 @app.route("/designer", methods=["GET", "POST"])
 def designer():
     designer = StiDesigner()
-    wire_designer(designer)
+    apply_license(designer)
+    designer.options.appearance.fullScreenMode = True
+    designer.options.localization = "ru"
+    apply_filter_panel_ui(designer.options.viewerOptions)
+    designer.onBeginProcessData += begin_process_data
+    designer.onSaveReport += save_report
+    designer.onSaveAsReport += save_report
 
     if sti_process(designer):
-        # ajax handler — без debug overlay
         return sti_response(designer)
 
-    # query на первом открытии тоже кладём в store
-    q = _public_query_params()
-    if q:
-        params_update(q)
-
     report = StiReport()
-    report.loadFile("/mrt")
+    report.loadFile("/mrt-render")
     designer.report = report
-    # debug-панель и на designer (Preview), не только /viewer
-    return sti_response(designer, inject_debug=True)
+    return sti_response(designer)
 
 
 @app.route("/viewer", methods=["GET", "POST"])
 def viewer():
-    viewer = StiViewer()
-    wire_viewer(viewer)
+    return build_viewer(filters=None, inject_screenshot=True)
 
-    if sti_process(viewer):
-        # handler/ajax — без debug overlay
-        return sti_response(viewer)
 
-    q = _public_query_params()
-    if q:
-        params_update(q)
+def _is_stimulsoft_handler_request() -> bool:
+    """POST от JS viewer (PrepareVariables / BeginProcessData / …), не наш JSON фильтров."""
+    if request.args.get("sti_event") or request.args.get("event"):
+        return True
+    raw = request.get_data(cache=True, as_text=False) or b""
+    if not raw:
+        return False
+    try:
+        text = raw.decode("utf-8", errors="ignore").lstrip()
+    except Exception:
+        return False
+    if not text.startswith("{") and not text.startswith("["):
+        return False
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(obj, dict):
+        return False
+    # типичные поля handler'а Stimulsoft
+    if obj.get("event") or obj.get("command") or obj.get("viewerId") or obj.get("data"):
+        return True
+    return False
 
-    report = StiReport()
-    report.loadFile("/mrt")
-    viewer.report = report
-    return sti_response(viewer, inject_debug=True)
+
+def _collect_incoming_filters() -> dict[str, object]:
+    """Собрать {name: value} из POST JSON / form или GET query."""
+    incoming: dict[str, object] = {}
+    is_handler = _is_stimulsoft_handler_request()
+    if request.method == "POST" and not is_handler:
+        body = request.get_json(silent=True)
+        if body is None and request.data:
+            try:
+                body = json.loads(request.data.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                body = None
+        incoming = _parse_filters_payload(body)
+        if not incoming and request.form:
+            incoming = {
+                k: v
+                for k, v in request.form.items()
+                if k not in _RENDER_QUERY_SKIP
+            }
+            if request.form.get("filters"):
+                incoming.update(_parse_filters_payload(request.form.get("filters")))
+    elif request.method == "GET":
+        if request.args.get("filters"):
+            incoming = _parse_filters_payload(request.args.get("filters"))
+        if not incoming:
+            incoming = {
+                k: v
+                for k, v in request.args.items()
+                if k not in _RENDER_QUERY_SKIP
+            }
+    return incoming
+
+
+def open_dashboard_with_filters():
+    """Подставить фильтры и открыть уже построенный дашборд (без Submit).
+
+    Отдельно от /viewer (preview с ручным Submit). Без ?rf= в URL.
+
+    GET  /open?trendtype=nocumulative&typenum=1000
+    GET  /open?filters={"trendtype":"nocumulative","typenum":1000}
+    POST /open  JSON {"filters":{"trendtype":"nocumulative","typenum":1000}}
+         → открывает браузер на /open (или ?open=0 без браузера)
+    """
+    legacy_rf = (request.args.get("rf") or "").strip() or None
+    incoming = _collect_incoming_filters()
+    is_handler = _is_stimulsoft_handler_request()
+
+    if incoming:
+        incoming = _normalize_filters_against_mrt(incoming)
+        _remember_filters(incoming)
+        if request.method == "POST" and not is_handler:
+            view_path = "/open"
+            view_url = f"http://{HOST}:{PORT}{view_path}"
+            open_flag = (request.args.get("open") or "1").strip().lower()
+            if open_flag not in {"0", "false", "no", "off"}:
+                try:
+                    webbrowser.open(view_url)
+                    print(f"opened browser: {view_url}", flush=True)
+                except Exception as exc:
+                    print(f"browser open failed: {exc}", flush=True)
+            wants_json = "application/json" in (request.headers.get("Accept") or "")
+            if wants_json:
+                return jsonify(
+                    {
+                        "ok": True,
+                        "url": view_url,
+                        "path": view_path,
+                        "filters": incoming,
+                    }
+                )
+            html = (
+                "<!doctype html><meta charset=utf-8>"
+                f"<meta http-equiv=refresh content='0;url={view_path}'>"
+                "<title>Opening dashboard…</title>"
+                "<p>Открываю дашборд с фильтрами… "
+                f"<a href='{view_path}'>{view_url}</a></p>"
+            )
+            return Response(html, mimetype="text/html; charset=utf-8")
+
+    filters = _resolve_filters(legacy_rf, incoming)
+    if filters:
+        filters = _normalize_filters_against_mrt(filters)
+        _remember_filters(filters)
+
+    print(f"open filters={filters}", flush=True)
+    return build_viewer(
+        filters=filters,
+        filter_token=None,
+        inject_screenshot=True,
+        auto_render=True,
+    )
+
+
+@app.route("/open", methods=["GET", "POST"])
+def open_with_filters():
+    """Передал фильтры → открылся дашборд уже с ними (без Submit)."""
+    return open_dashboard_with_filters()
 
 
 def main() -> None:
     print("Stimulsoft Dashboards.PYTHON 2024.2.2 — official Flask wiring", flush=True)
     print(f"MRT: {MRT_PATH.resolve()}", flush=True)
     print(f"Designer: http://{HOST}:{PORT}/designer", flush=True)
-    print(f"Viewer:   http://{HOST}:{PORT}/viewer", flush=True)
-    print(f"Params:   POST/GET http://{HOST}:{PORT}/api/params", flush=True)
-    print(f"LLM pack: GET http://{HOST}:{PORT}/api/llm-pack", flush=True)
-    print(f"Verify:   GET http://{HOST}:{PORT}/api/verify", flush=True)
-    print(f"Clicks:   GET http://{HOST}:{PORT}/api/interactions", flush=True)
+    print(f"Viewer:   http://{HOST}:{PORT}/viewer   (preview + Submit)", flush=True)
+    print(f"Filters:  http://{HOST}:{PORT}/filters", flush=True)
+    print(f"Open:     http://{HOST}:{PORT}/open     (filters → ready dashboard)", flush=True)
+    print(f"Shot:     http://{HOST}:{PORT}/shot     (signal → open tab shoots)", flush=True)
+    print(f"Swagger:  http://{HOST}:{PORT}/docs", flush=True)
+    print(f"Screens:  {EXPORT_DIR.resolve()}", flush=True)
     if OPEN_BROWSER:
         try:
             webbrowser.open(f"http://{HOST}:{PORT}/viewer")
         except Exception:
             pass
-    app.run(host=HOST, port=PORT, debug=False)
+    app.run(host=HOST, port=PORT, debug=False, threaded=True)
 
 
 if __name__ == "__main__":
