@@ -1421,6 +1421,9 @@ def screenshot_dashboard_js():
 def filters():
     """Variables с Category «Фильтр(ы)»: items или SQL dialog.source (SQL считается по умолчанию)."""
     try:
+        local_dir = str(ROOT / "local")
+        if local_dir not in sys.path:
+            sys.path.insert(0, local_dir)
         from filters_mrt import extract_filters
 
         # по умолчанию SQL выполняется; ?run_queries=0 — только метаданные
