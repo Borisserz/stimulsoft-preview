@@ -10,8 +10,7 @@
  * fallback — SVG с inline fill у text; прячем iframe, снимаем страницу.
  */
 (function () {
-  var HTML2CANVAS =
-    "https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js";
+  var HTML2CANVAS = "/vendor/html2canvas.min.js";
   var SCALE = 2;
 
   function loadScript(src) {
@@ -1541,6 +1540,7 @@
     if (window.__dashShotBusy) return;
     window.__dashShotBusy = true;
     window.__dashShotDone = null;
+    var shotId = opts.id || null;
     try {
       // по сигналу /shot дашборд уже на экране — не ждать 70с
       if (opts.skipWait) {
@@ -1550,6 +1550,7 @@
       } else {
         await waitDashboardReady(70000);
       }
+      await loadScript(HTML2CANVAS);
       var result = await takeScreenshot();
       window.__dashShotDone = result || {
         ok: false,
@@ -1569,6 +1570,7 @@
     } finally {
       window.__dashShotBusy = false;
     }
+    if (shotId) window.__dashShotDone.id = shotId;
     console.log("[dash-shot] done", window.__dashShotDone);
     await reportShotDone(window.__dashShotDone, opts.shotKey);
   }
@@ -1576,21 +1578,30 @@
   function startShotPoller() {
     if (window.__dashShotPoller) return;
     window.__dashShotPoller = true;
+    var lastId = null;
     function loop() {
       if (window.__dashShotBusy) {
         setTimeout(loop, 400);
         return;
       }
       var mrt = currentMrtParam();
-      var pollUrl = mrt ? "/api/shot-poll?mrt=" + encodeURIComponent(mrt) : "/api/shot-poll";
+      var params = [];
+      if (mrt) params.push("mrt=" + encodeURIComponent(mrt));
+      if (lastId) params.push("since=" + encodeURIComponent(lastId));
+      var pollUrl = "/api/shot-poll" + (params.length ? "?" + params.join("&") : "");
       fetch(pollUrl, { cache: "no-store" })
         .then(function (r) {
           return r.json();
         })
         .then(function (j) {
-          if (j && j.shoot) {
-            console.log("[dash-shot] signal → shoot", j.key || "");
-            return runAutoShot({ skipWait: true, shotKey: j.key || "" }).then(function () {
+          if (j && j.shoot && (!j.id || j.id !== lastId)) {
+            if (j.id) lastId = j.id;
+            console.log("[dash-shot] signal → shoot", j.id || j.key || "");
+            return runAutoShot({
+              skipWait: true,
+              shotKey: j.key || "",
+              id: j.id || null,
+            }).then(function () {
               loop();
             });
           }
