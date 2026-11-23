@@ -1514,9 +1514,19 @@
     });
   }
 
-  async function reportShotDone(result) {
+  function currentMrtParam() {
     try {
-      await fetch("/api/shot-done", {
+      return (new URLSearchParams(window.location.search).get("mrt") || "").trim();
+    } catch (e) {
+      return "";
+    }
+  }
+
+  async function reportShotDone(result, shotKey) {
+    try {
+      var k = String(shotKey || currentMrtParam() || "").trim();
+      var url = k ? "/api/shot-done?key=" + encodeURIComponent(k) : "/api/shot-done";
+      await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(result || { ok: false, error: "empty" }),
@@ -1560,7 +1570,7 @@
       window.__dashShotBusy = false;
     }
     console.log("[dash-shot] done", window.__dashShotDone);
-    await reportShotDone(window.__dashShotDone);
+    await reportShotDone(window.__dashShotDone, opts.shotKey);
   }
 
   function startShotPoller() {
@@ -1571,14 +1581,16 @@
         setTimeout(loop, 400);
         return;
       }
-      fetch("/api/shot-poll", { cache: "no-store" })
+      var mrt = currentMrtParam();
+      var pollUrl = mrt ? "/api/shot-poll?mrt=" + encodeURIComponent(mrt) : "/api/shot-poll";
+      fetch(pollUrl, { cache: "no-store" })
         .then(function (r) {
           return r.json();
         })
         .then(function (j) {
           if (j && j.shoot) {
-            console.log("[dash-shot] signal → shoot");
-            return runAutoShot({ skipWait: true }).then(function () {
+            console.log("[dash-shot] signal → shoot", j.key || "");
+            return runAutoShot({ skipWait: true, shotKey: j.key || "" }).then(function () {
               loop();
             });
           }

@@ -25,7 +25,7 @@ import time
 import webbrowser
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import quote_plus, urlencode, urlparse
 
 import stimulsoft_dashboards  # noqa: F401 — подтягивает dashboards.js
 from flask import Flask, Response, jsonify, request, session
@@ -472,13 +472,35 @@ def _coerce_variable_value(type_name: str | None, value: object) -> object:
     return value
 
 
-def _store_render_filters(filters: dict[str, object]) -> str:
+_STATE_LOCK = threading.RLock()
+
+
+def _store_render_entry(filters: dict[str, object], *, mrt_name: str = "") -> str:
     token = secrets.token_urlsafe(12)
-    RENDER_FILTER_STORE[token] = dict(filters)
-    # не раздувать память
-    while len(RENDER_FILTER_STORE) > 64:
-        RENDER_FILTER_STORE.pop(next(iter(RENDER_FILTER_STORE)), None)
+    entry: dict[str, object] = {"mrt": mrt_name, "filters": dict(filters)}
+    with _STATE_LOCK:
+        RENDER_FILTER_STORE[token] = entry
+        # не раздувать память
+        while len(RENDER_FILTER_STORE) > 64:
+            RENDER_FILTER_STORE.pop(next(iter(RENDER_FILTER_STORE)), None)
     return token
+
+
+def _store_render_filters(filters: dict[str, object]) -> str:
+    return _store_render_entry(filters)
+
+
+def _load_render_entry(token: str | None) -> tuple[str | None, dict[str, object] | None]:
+    if not token:
+        return None, None
+    with _STATE_LOCK:
+        got = RENDER_FILTER_STORE.get(token)
+    if not isinstance(got, dict):
+        return None, None
+    if "filters" in got and isinstance(got.get("filters"), dict):
+        mrt = str(got.get("mrt") or "").strip() or None
+        return mrt, dict(got["filters"])  # type: ignore[arg-type]
+    return None, dict(got)
 
 
 _CHOSEN_MRT: dict[str, str] = {"name": ""}
@@ -489,12 +511,14 @@ def choose_mrt(name: str) -> Path | None:
     path = mrt_by_name(name)
     if path is None:
         return None
-    _CHOSEN_MRT["name"] = path.name
+    with _STATE_LOCK:
+        _CHOSEN_MRT["name"] = path.name
     return path
 
 
 def active_mrt() -> Path:
-    chosen = mrt_by_name(_CHOSEN_MRT.get("name") or "")
+    with _STATE_LOCK:
+        chosen = mrt_by_name(_CHOSEN_MRT.get("name") or "")
     if chosen is not None:
         return chosen
     return MRT_PATH
@@ -504,15 +528,14 @@ def _remember_filters(filters: dict[str, object]) -> None:
     """Session + last-wins (для /open без ?rf=)."""
     data = dict(filters)
     session["render_filters"] = data
-    LATEST_RENDER_FILTERS.clear()
-    LATEST_RENDER_FILTERS.update(data)
+    with _STATE_LOCK:
+        LATEST_RENDER_FILTERS.clear()
+        LATEST_RENDER_FILTERS.update(data)
 
 
 def _load_render_filters(token: str | None) -> dict[str, object] | None:
-    if not token:
-        return None
-    got = RENDER_FILTER_STORE.get(token)
-    return dict(got) if isinstance(got, dict) else None
+    _, filters = _load_render_entry(token)
+    return filters
 
 
 def _resolve_filters(
@@ -520,10 +543,12 @@ def _resolve_filters(
     incoming: dict[str, object] | None = None,
 ) -> dict[str, object] | None:
     """rf (legacy) → session → LATEST → incoming."""
+    with _STATE_LOCK:
+        latest_snap = dict(LATEST_RENDER_FILTERS)
     for cand in (
         _load_render_filters(token),
         session.get("render_filters"),
-        LATEST_RENDER_FILTERS,
+        latest_snap,
         incoming,
     ):
         if isinstance(cand, dict) and cand:
@@ -531,7 +556,7 @@ def _resolve_filters(
     return None
 
 
-def make_prepare_variables(filters: dict[str, object]):
+def make_prepare_variables(filters: dict[str, object], *, mrt_path: Path | None = None):
     """onPrepareVariables: подставить переданные фильтры перед рендером."""
 
     def prepare_variables(args: StiVariablesEventArgs) -> None:
@@ -546,7 +571,7 @@ def make_prepare_variables(filters: dict[str, object]):
             )
             return
         # name + alias → real variable key
-        index = _mrt_var_index()
+        index = _mrt_var_index(mrt_path)
         by_lower = {str(name).lower(): name for name in variables.keys()}
         ordered = list(variables.items())
         applied = []
@@ -615,11 +640,13 @@ def _mrt_var_index(mrt_path: Path | None = None) -> dict[str, dict]:
     return out
 
 
-def _normalize_filters_against_mrt(filters: dict[str, object]) -> dict[str, object]:
+def _normalize_filters_against_mrt(
+    filters: dict[str, object], *, mrt_path: Path | None = None
+) -> dict[str, object]:
     """alias→name, value под Type (StringList → list, не JSON-строка)."""
     if not filters:
         return {}
-    index = _mrt_var_index()
+    index = _mrt_var_index(mrt_path)
     out: dict[str, object] = {}
     for key, value in filters.items():
         meta = index.get(str(key).lower())
@@ -766,6 +793,7 @@ def build_viewer(
     *,
     filters: dict[str, object] | None = None,
     filter_token: str | None = None,
+    mrt_name: str | None = None,
     inject_screenshot: bool = True,
     auto_render: bool = False,
     auto_shot: bool = False,
@@ -781,10 +809,11 @@ def build_viewer(
     viewer.options.appearance.fullScreenMode = True
     apply_filter_panel_ui(viewer.options)
     viewer.onBeginProcessData += begin_process_data
+    target_mrt_path = mrt_by_name(mrt_name) if mrt_name else None
     # /open: панель нужна — Submit шлёт postInteraction(Variables), без этого
     # карта остаётся без данных. Кнопку жмём сами в JS после render.
     if filters:
-        viewer.onPrepareVariables += make_prepare_variables(filters)
+        viewer.onPrepareVariables += make_prepare_variables(filters, mrt_path=target_mrt_path)
         # клиентский хук как дополнительный канал
         viewer.onPrepareVariables += "dashApplyFilters"
     # StiJavaScript всегда клеит `?sti_event=` к handler.url —
@@ -809,11 +838,14 @@ def build_viewer(
         )
 
     report = StiReport()
-    # /open|/shot → /mrt-render?rf=…; /viewer → сырой шаблон через /mrt-render без rf
+    # /open|/shot → /mrt-render?rf=…&mrt=…; /viewer → сырой шаблон через /mrt-render без rf
+    load_q: dict[str, str] = {}
     if (auto_render or auto_shot) and filter_token:
-        report.loadFile(f"/mrt-render?rf={filter_token}")
-    else:
-        report.loadFile("/mrt-render")
+        load_q["rf"] = filter_token
+    if mrt_name:
+        load_q["mrt"] = mrt_name
+    load_url = f"/mrt-render?{urlencode(load_q)}" if load_q else "/mrt-render"
+    report.loadFile(load_url)
     viewer.report = report
     return sti_response(
         viewer,
@@ -1605,15 +1637,23 @@ def _shot_wait_ms() -> int:
         return 90000
 
 
+def _shot_key_from_request() -> str:
+    return (request.args.get("mrt") or "").strip() or _SHOT_GLOBAL_KEY
+
+
 @app.get("/api/shot-poll")
 def api_shot_poll():
     """Long-poll: ждёт сигнал GET /shot до ~25с (без спама каждые 0.8с)."""
+    tab_key = _shot_key_from_request()
     deadline = time.time() + 25.0
     while time.time() < deadline:
         with _SHOT_LOCK:
+            if tab_key != _SHOT_GLOBAL_KEY and tab_key in _SHOT_PENDING:
+                _SHOT_PENDING.pop(tab_key, None)
+                return jsonify({"shoot": True, "key": tab_key})
             if _SHOT_GLOBAL_KEY in _SHOT_PENDING:
                 _SHOT_PENDING.pop(_SHOT_GLOBAL_KEY, None)
-                return jsonify({"shoot": True})
+                return jsonify({"shoot": True, "key": _SHOT_GLOBAL_KEY})
         time.sleep(0.1)
     return jsonify({"shoot": False})
 
@@ -1624,23 +1664,24 @@ def api_shot_done():
     body = request.get_json(silent=True) or {}
     if not isinstance(body, dict):
         body = {"ok": False, "error": "bad body"}
+    res_key = (request.args.get("key") or request.args.get("mrt") or "").strip() or _SHOT_GLOBAL_KEY
     with _SHOT_LOCK:
-        _SHOT_RESULTS[_SHOT_GLOBAL_KEY] = body
+        _SHOT_RESULTS[res_key] = body
     return jsonify({"ok": True})
 
 
 @app.get("/shot")
 def api_shot():
-    """Сигнал любой открытой вкладке /open: скрин + download, без токена и без reload.
+    """Сигнал открытой вкладке /open (по ?mrt= или любой): скрин + download.
 
-    1) Браузер: /open?...  (вкладка остаётся открытой)
-    2) GET /shot           → вкладка снимает PNG/PDF и скачивает
+    1) Браузер: /open?mrt=...  (вкладка остаётся открытой)
+    2) GET /shot?mrt=...      → вкладка снимает PNG/PDF и скачивает
     """
-    key = _SHOT_GLOBAL_KEY
+    key = _shot_key_from_request()
     with _SHOT_LOCK:
         _SHOT_PENDING[key] = time.time()
         _SHOT_RESULTS.pop(key, None)
-    print("shot signal (global)", flush=True)
+    print(f"shot signal ({key})", flush=True)
 
     deadline = time.time() + (_shot_wait_ms() / 1000.0)
     result: dict[str, object] | None = None
@@ -1675,10 +1716,16 @@ def api_shot():
 
 @app.route("/mrt-render", methods=["GET", "POST"])
 def serve_mrt_render():
-    """Шаблон: Value фильтров из session/LATEST (или legacy ?rf=). Без фильтров — сырой .mrt."""
+    """Шаблон: Value фильтров из ?rf=/session/LATEST и шаблон из ?mrt=/active_mrt()."""
     token = (request.args.get("rf") or "").strip() or None
-    raw = active_mrt().read_text(encoding="utf-8-sig")
-    filters = _resolve_filters(token) or {}
+    asked_mrt = _requested_mrt_name()
+    tok_mrt, tok_filters = _load_render_entry(token)
+    chosen_name = asked_mrt or (tok_mrt or "")
+    target_mrt = mrt_by_name(chosen_name) if chosen_name else None
+    if target_mrt is None:
+        target_mrt = active_mrt()
+    raw = target_mrt.read_text(encoding="utf-8-sig")
+    filters = tok_filters if tok_filters is not None else (_resolve_filters(token) or {})
     if not filters:
         resp = Response(raw, mimetype="application/json; charset=utf-8")
         resp.headers["Cache-Control"] = "no-store"
@@ -1779,62 +1826,75 @@ def _collect_incoming_filters() -> dict[str, object]:
 def open_dashboard_with_filters():
     """Подставить фильтры и открыть уже построенный дашборд (без Submit).
 
-    Отдельно от /viewer (preview с ручным Submit). Без ?rf= в URL.
+    Отдельно от /viewer (preview с ручным Submit).
 
     GET  /open?trendtype=nocumulative&typenum=1000
-    GET  /open?filters={"trendtype":"nocumulative","typenum":1000}
-    POST /open  JSON {"filters":{"trendtype":"nocumulative","typenum":1000}}
-         → открывает браузер на /open (или ?open=0 без браузера)
+    GET  /open?mrt=plain.mrt&rf=...
+    POST /open  JSON {"mrt":"plain.mrt","filters":{...}}
+         → возвращает URL с ?mrt=...&rf=... (или открывает браузер)
     """
     asked = _requested_mrt_name()
-    if asked and choose_mrt(asked) is None:
-        return jsonify({"ok": False, "error": "нет такого .mrt", "mrt": asked}), 404
+    target_mrt: Path | None = None
+    if asked:
+        target_mrt = choose_mrt(asked)
+        if target_mrt is None:
+            return jsonify({"ok": False, "error": "нет такого .mrt", "mrt": asked}), 404
     legacy_rf = (request.args.get("rf") or "").strip() or None
+    tok_mrt, tok_filters = _load_render_entry(legacy_rf)
+    if target_mrt is None and tok_mrt:
+        target_mrt = mrt_by_name(tok_mrt)
+    if target_mrt is None:
+        target_mrt = active_mrt()
+
     incoming = _collect_incoming_filters()
     is_handler = _is_stimulsoft_handler_request()
 
     if incoming:
-        incoming = _normalize_filters_against_mrt(incoming)
+        incoming = _normalize_filters_against_mrt(incoming, mrt_path=target_mrt)
         _remember_filters(incoming)
-        if request.method == "POST" and not is_handler:
-            view_path = "/open"
-            view_url = f"http://{HOST}:{PORT}{view_path}"
-            open_flag = (request.args.get("open") or "1").strip().lower()
-            if open_flag not in {"0", "false", "no", "off"}:
-                try:
-                    webbrowser.open(view_url)
-                    print(f"opened browser: {view_url}", flush=True)
-                except Exception as exc:
-                    print(f"browser open failed: {exc}", flush=True)
-            wants_json = "application/json" in (request.headers.get("Accept") or "")
-            if wants_json:
-                return jsonify(
-                    {
-                        "ok": True,
-                        "url": view_url,
-                        "path": view_path,
-                        "filters": incoming,
-                        "mrt": active_mrt().name,
-                    }
-                )
-            html = (
-                "<!doctype html><meta charset=utf-8>"
-                f"<meta http-equiv=refresh content='0;url={view_path}'>"
-                "<title>Opening dashboard…</title>"
-                "<p>Открываю дашборд с фильтрами… "
-                f"<a href='{view_path}'>{view_url}</a></p>"
-            )
-            return Response(html, mimetype="text/html; charset=utf-8")
 
-    filters = _resolve_filters(legacy_rf, incoming)
+    if request.method == "POST" and not is_handler:
+        token = _store_render_entry(incoming, mrt_name=target_mrt.name)
+        view_path = f"/open?{urlencode({'mrt': target_mrt.name, 'rf': token})}"
+        base_host = (request.host_url or "").rstrip("/") or f"http://{HOST}:{PORT}"
+        view_url = f"{base_host}{view_path}"
+        open_flag = (request.args.get("open") or "1").strip().lower()
+        if open_flag not in {"0", "false", "no", "off"}:
+            try:
+                webbrowser.open(view_url)
+                print(f"opened browser: {view_url}", flush=True)
+            except Exception as exc:
+                print(f"browser open failed: {exc}", flush=True)
+        wants_json = "application/json" in (request.headers.get("Accept") or "")
+        if wants_json:
+            return jsonify(
+                {
+                    "ok": True,
+                    "url": view_url,
+                    "path": view_path,
+                    "filters": incoming,
+                    "mrt": target_mrt.name,
+                }
+            )
+        html = (
+            "<!doctype html><meta charset=utf-8>"
+            f"<meta http-equiv=refresh content='0;url={view_path}'>"
+            "<title>Opening dashboard…</title>"
+            "<p>Открываю дашборд с фильтрами… "
+            f"<a href='{view_path}'>{view_url}</a></p>"
+        )
+        return Response(html, mimetype="text/html; charset=utf-8")
+
+    filters = tok_filters if tok_filters is not None else _resolve_filters(legacy_rf, incoming)
     if filters:
-        filters = _normalize_filters_against_mrt(filters)
+        filters = _normalize_filters_against_mrt(filters, mrt_path=target_mrt)
         _remember_filters(filters)
 
-    print(f"open filters={filters}", flush=True)
+    print(f"open mrt={target_mrt.name} filters={filters}", flush=True)
     return build_viewer(
         filters=filters,
-        filter_token=None,
+        filter_token=legacy_rf,
+        mrt_name=target_mrt.name,
         inject_screenshot=True,
         auto_render=True,
     )
