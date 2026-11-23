@@ -132,12 +132,13 @@ def apply_filter_panel_ui(viewer_options) -> None:
     appearance.allowMobileMode = False
     # Stimulsoft: columns = 1 если count <= minParametersCountForMultiColumns (дефолт 5)
     appearance.minParametersCountForMultiColumns = 1
-    appearance.parametersPanelColumnsCount = 8
+    # 3 пары в ряд: длинная строка из 8 полей уезжала в горизонтальный скролл.
+    appearance.parametersPanelColumnsCount = 3
 
 
 def filter_param_width() -> int:
     """Ширина контролов панели фильтров, px. FILTER_PARAM_WIDTH в .env."""
-    raw = (os.environ.get("FILTER_PARAM_WIDTH") or "180").strip() or "180"
+    raw = (os.environ.get("FILTER_PARAM_WIDTH") or "120").strip() or "120"
     try:
         width = int(raw)
     except ValueError:
@@ -152,11 +153,18 @@ def inject_filter_panel_layout(html: str) -> str:
     w = filter_param_width()
     block = (
         "<style id=\"dashFilterPanelLayout\">\n"
+        ".stiJsViewerParametersPanel {\n"
+        "  max-width: 100%;\n"
+        "}\n"
+        ".stiJsViewerParametersPanel td {\n"
+        "  white-space: normal !important;\n"
+        "}\n"
         ".stiJsViewerParametersPanel .stiJsViewerTextBoxDefault input,\n"
         ".stiJsViewerParametersPanel input.stiJsViewerTextBox,\n"
         ".stiJsViewerParametersPanel .stiJsViewerTextBox {\n"
-        f"  min-width: {w}px !important;\n"
+        f"  min-width: 0 !important;\n"
         f"  width: {w}px !important;\n"
+        f"  max-width: 100% !important;\n"
         "}\n"
         ".stiJsViewerParametersPanel [id$=\"MainButtons\"] {\n"
         "  margin-top: 0 !important;\n"
@@ -269,17 +277,36 @@ def inject_filter_panel_layout(html: str) -> str:
 
 load_env()
 
+def local_mrt_files() -> list[Path]:
+    folder = ROOT / "local"
+    if not folder.is_dir():
+        return []
+    return sorted(path for path in folder.glob("*.mrt") if path.is_file())
+
+
+def mrt_by_name(name: str) -> Path | None:
+    """A dashboard file in local/. The name is the file, not a path."""
+    raw = Path(str(name or "")).name
+    if not raw.lower().endswith(".mrt"):
+        return None
+    path = (ROOT / "local" / raw).resolve()
+    local = (ROOT / "local").resolve()
+    if not str(path).startswith(str(local)) or not path.is_file():
+        return None
+    return path
+
+
 def resolve_mrt(raw: str) -> Path | None:
     if raw:
         chosen = path_of(raw)
         if chosen.is_file():
             return chosen
-        named = ROOT / "local" / Path(raw).name
-        if named.is_file():
+        named = mrt_by_name(raw)
+        if named is not None:
             return named
         return chosen
-    found = sorted((ROOT / "local").glob("*.mrt")) if (ROOT / "local").is_dir() else []
-    if len(found) == 1:
+    found = local_mrt_files()
+    if found:
         return found[0]
     return None
 
@@ -292,7 +319,7 @@ elif _mrt:
 else:
     MRT_PATH = resolve_mrt("")
 if MRT_PATH is None:
-    raise SystemExit("Задай MRT_PATH в local/.env или положи один .mrt в local/")
+    raise SystemExit("Задай MRT_PATH в local/.env или положи .mrt в local/")
 if not MRT_PATH.is_file():
     raise SystemExit(f"Нет .mrt: {MRT_PATH}")
 
@@ -432,6 +459,25 @@ def _store_render_filters(filters: dict[str, object]) -> str:
     return token
 
 
+_CHOSEN_MRT: dict[str, str] = {"name": ""}
+
+
+def choose_mrt(name: str) -> Path | None:
+    """Remember which local .mrt the next /open and /mrt-render read."""
+    path = mrt_by_name(name)
+    if path is None:
+        return None
+    _CHOSEN_MRT["name"] = path.name
+    return path
+
+
+def active_mrt() -> Path:
+    chosen = mrt_by_name(_CHOSEN_MRT.get("name") or "")
+    if chosen is not None:
+        return chosen
+    return MRT_PATH
+
+
 def _remember_filters(filters: dict[str, object]) -> None:
     """Session + last-wins (для /open без ?rf=)."""
     data = dict(filters)
@@ -528,7 +574,7 @@ def _mrt_variable_list(data: dict) -> list[tuple[str, dict]]:
 
 def _mrt_var_index(mrt_path: Path | None = None) -> dict[str, dict]:
     """name/alias(lower) → {name, alias, type, raw} из текущего .mrt."""
-    path = mrt_path or MRT_PATH
+    path = mrt_path or active_mrt()
     try:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
@@ -762,7 +808,7 @@ def save_report(args: StiReportEventArgs):
     if args.report is None:
         return StiResult.getError("empty report")
     try:
-        MRT_PATH.write_text(
+        active_mrt().write_text(
             json.dumps(args.report, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
@@ -1120,7 +1166,7 @@ def openapi_spec() -> dict:
             "description": (
                 "`/viewer` — preview (панель + Submit). "
                 "`/open` — передал фильтры → сразу готовый дашборд. "
-                f"MRT: `{MRT_PATH.name}`"
+                f"MRT: `{active_mrt().name}`"
             ),
         },
         "paths": {
@@ -1417,9 +1463,34 @@ def screenshot_dashboard_js():
     return resp
 
 
+def _requested_mrt_name() -> str:
+    if request.method == "POST" and not _is_stimulsoft_handler_request():
+        body = request.get_json(silent=True)
+        if isinstance(body, dict) and str(body.get("mrt") or "").strip():
+            return str(body.get("mrt") or "").strip()
+    return (request.args.get("mrt") or "").strip()
+
+
+@app.get("/dashboards")
+def dashboards():
+    """Every .mrt in local/. The picker chooses one, then /filters and /open."""
+    rows = [{"name": path.name, "title": path.stem} for path in local_mrt_files()]
+    resp = jsonify({"dashboards": rows, "mrt": active_mrt().name})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 @app.get("/filters")
 def filters():
     """Variables с Category «Фильтр(ы)»: items или SQL dialog.source (SQL считается по умолчанию)."""
+    asked = _requested_mrt_name()
+    if asked:
+        chosen = choose_mrt(asked)
+        if chosen is None:
+            return jsonify({"ok": False, "error": "нет такого .mrt", "mrt": asked, "filters": []}), 404
+        path = chosen
+    else:
+        path = active_mrt()
     try:
         local_dir = str(ROOT / "local")
         if local_dir not in sys.path:
@@ -1430,14 +1501,14 @@ def filters():
         rq = (request.args.get("run_queries") or request.args.get("sql") or "1").strip().lower()
         run_queries = rq not in {"0", "false", "no", "off"}
         plan = extract_filters(
-            MRT_PATH,
+            path,
             run_queries=run_queries,
             database_url=_db or None,
         )
     except Exception as exc:
         return jsonify(
             {
-                "mrt": MRT_PATH.name,
+                "mrt": path.name,
                 "kind": "category_filters",
                 "error": str(exc),
                 "count": 0,
@@ -1468,7 +1539,7 @@ def api_screenshot():
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     name = _safe_name(
         str(body.get("name") or ""),
-        f"{MRT_PATH.stem}_{stamp}.png",
+        f"{active_mrt().stem}_{stamp}.png",
         str(body.get("ext") or "") or None,
     )
     out = EXPORT_DIR / name
@@ -1564,7 +1635,7 @@ def api_shot():
 def serve_mrt_render():
     """Шаблон: Value фильтров из session/LATEST (или legacy ?rf=). Без фильтров — сырой .mrt."""
     token = (request.args.get("rf") or "").strip() or None
-    raw = MRT_PATH.read_text(encoding="utf-8-sig")
+    raw = active_mrt().read_text(encoding="utf-8-sig")
     filters = _resolve_filters(token) or {}
     if not filters:
         resp = Response(raw, mimetype="application/json; charset=utf-8")
@@ -1673,6 +1744,9 @@ def open_dashboard_with_filters():
     POST /open  JSON {"filters":{"trendtype":"nocumulative","typenum":1000}}
          → открывает браузер на /open (или ?open=0 без браузера)
     """
+    asked = _requested_mrt_name()
+    if asked and choose_mrt(asked) is None:
+        return jsonify({"ok": False, "error": "нет такого .mrt", "mrt": asked}), 404
     legacy_rf = (request.args.get("rf") or "").strip() or None
     incoming = _collect_incoming_filters()
     is_handler = _is_stimulsoft_handler_request()
@@ -1698,6 +1772,7 @@ def open_dashboard_with_filters():
                         "url": view_url,
                         "path": view_path,
                         "filters": incoming,
+                        "mrt": active_mrt().name,
                     }
                 )
             html = (
@@ -1731,7 +1806,8 @@ def open_with_filters():
 
 def main() -> None:
     print("Stimulsoft Dashboards.PYTHON 2024.2.2 — official Flask wiring", flush=True)
-    print(f"MRT: {MRT_PATH.resolve()}", flush=True)
+    print(f"MRT: {MRT_PATH.resolve()}  (local: {len(local_mrt_files())})", flush=True)
+    print(f"List:     http://{HOST}:{PORT}/dashboards", flush=True)
     print(f"Designer: http://{HOST}:{PORT}/designer", flush=True)
     print(f"Viewer:   http://{HOST}:{PORT}/viewer   (preview + Submit)", flush=True)
     print(f"Filters:  http://{HOST}:{PORT}/filters", flush=True)
