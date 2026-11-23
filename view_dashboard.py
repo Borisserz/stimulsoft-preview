@@ -277,6 +277,28 @@ def inject_filter_panel_layout(html: str) -> str:
 
 load_env()
 
+_PREVIEW_EXT = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
+
+
+def preview_for_mrt(path: Path) -> Path | None:
+    """The picture next to this .mrt. The file name before the extension must match."""
+    local = (ROOT / "local").resolve()
+    for ext in _PREVIEW_EXT:
+        candidate = (path.parent / f"{path.stem}{ext}").resolve()
+        try:
+            candidate.relative_to(local)
+        except ValueError:
+            continue
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def local_mrt_files() -> list[Path]:
     folder = ROOT / "local"
     if not folder.is_dir():
@@ -1474,8 +1496,28 @@ def _requested_mrt_name() -> str:
 @app.get("/dashboards")
 def dashboards():
     """Every .mrt in local/. The picker chooses one, then /filters and /open."""
-    rows = [{"name": path.name, "title": path.stem} for path in local_mrt_files()]
+    rows = []
+    for path in local_mrt_files():
+        row: dict[str, str] = {"name": path.name, "title": path.stem}
+        shot = preview_for_mrt(path)
+        if shot is not None:
+            row["preview"] = shot.name
+        rows.append(row)
     resp = jsonify({"dashboards": rows, "mrt": active_mrt().name})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.get("/dashboards/preview")
+def dashboard_preview():
+    """PNG/JPEG/WebP whose name matches the chosen .mrt."""
+    path = mrt_by_name((request.args.get("mrt") or "").strip())
+    if path is None:
+        return jsonify({"ok": False, "error": "нет такого .mrt"}), 404
+    shot = preview_for_mrt(path)
+    if shot is None:
+        return jsonify({"ok": False, "error": "нет снимка"}), 404
+    resp = Response(shot.read_bytes(), mimetype=_PREVIEW_EXT[shot.suffix.lower()])
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
