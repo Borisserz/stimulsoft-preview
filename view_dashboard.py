@@ -57,6 +57,8 @@ _SHOT_LOCK = threading.Lock()
 _SHOT_PENDING: dict[str, dict[str, object]] = {}
 _SHOT_RESULTS: dict[str, dict[str, object]] = {}
 _RENDER_QUERY_SKIP = {
+    "mrt",
+    "dashboard",
     "run_queries",
     "sql",
     "filters",
@@ -2000,17 +2002,40 @@ def viewer():
 
 def _is_stimulsoft_handler_request() -> bool:
     """POST от JS viewer (PrepareVariables / BeginProcessData / …), не наш JSON фильтров."""
-    if request.args.get("sti_event") or request.args.get("event"):
+    if (
+        request.args.get("sti_event")
+        or request.args.get("event")
+        or request.args.get("sti_data")
+    ):
+        return True
+    if request.form and (
+        request.form.get("sti_event") or request.form.get("sti_data")
+    ):
         return True
     raw = request.get_data(cache=True, as_text=False) or b""
     if not raw:
         return False
     try:
-        text = raw.decode("utf-8", errors="ignore").lstrip()
+        text = raw.decode("utf-8", errors="ignore").strip()
     except Exception:
         return False
-    if not text.startswith("{") and not text.startswith("["):
+    if not text:
         return False
+    if not text.startswith("{") and not text.startswith("["):
+        # Stimulsoft JS encrypts handler POST bodies as ROT13(base64(JSON)).
+        try:
+            import codecs
+
+            rot = codecs.decode(text, "rot_13")
+            decoded = base64.b64decode(rot.encode("ascii"), validate=False).decode(
+                "utf-8", errors="ignore"
+            ).lstrip()
+            if decoded.startswith("{"):
+                text = decoded
+            else:
+                return False
+        except Exception:
+            return False
     try:
         obj = json.loads(text)
     except json.JSONDecodeError:
@@ -2018,7 +2043,13 @@ def _is_stimulsoft_handler_request() -> bool:
     if not isinstance(obj, dict):
         return False
     # типичные поля handler'а Stimulsoft
-    if obj.get("event") or obj.get("command") or obj.get("viewerId") or obj.get("data"):
+    if (
+        obj.get("event")
+        or obj.get("command")
+        or obj.get("viewerId")
+        or obj.get("data")
+        or obj.get("clientGuid")
+    ):
         return True
     return False
 

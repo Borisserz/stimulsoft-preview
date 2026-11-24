@@ -231,6 +231,32 @@ class ViewDashboardTests(unittest.TestCase):
         self.assertNotIn("url", body)
         mock_browser.assert_not_called()
 
+    def test_stimulsoft_rot13_base64_and_form_handler_post_are_not_treated_as_open_filters(self) -> None:
+        import codecs
+
+        with mock.patch.object(vd, "ROOT", self.base), mock.patch.object(
+            vd.webbrowser, "open"
+        ) as mock_browser:
+            # 1) GET /open?mrt=demo.mrt must NOT treat "mrt" query param as a filter variable
+            get_resp = self.client.get("/open?mrt=demo.mrt")
+            self.assertEqual(get_resp.status_code, 200)
+            self.assertNotIn("mrt", vd.LATEST_RENDER_FILTERS)
+
+            # 2) Stimulsoft JS viewer sends ROT13(base64(JSON)) body to POST /open (without ?sti_event= in query)
+            raw_json = json.dumps({"event": "BeginProcessData", "command": "ProcessSqlData", "clientGuid": "123"})
+            b64 = vd.base64.b64encode(raw_json.encode("utf-8")).decode("ascii")
+            rot13_body = codecs.encode(b64, "rot_13")
+            post_resp = self.client.post(
+                "/open",
+                data=rot13_body,
+                content_type="text/plain;charset=UTF-8",
+            )
+            # Must NOT return the meta-refresh "Opening dashboard..." HTML or call webbrowser.open!
+            mock_browser.assert_not_called()
+            self.assertNotIn("Opening dashboard", post_resp.get_data(as_text=True))
+
+
+
 
 if __name__ == "__main__":
     unittest.main()
