@@ -298,6 +298,12 @@ app.secret_key = (
 )
 
 _ACTIVE_MRT: Path = MRT_PATH
+_PREVIEW_EXT = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
 
 
 def active_mrt() -> Path:
@@ -305,9 +311,8 @@ def active_mrt() -> Path:
         return _ACTIVE_MRT
 
 
-def _select_mrt(name: str) -> Path | None:
-    """Найти .mrt по имени (в dashboards/ или рядом с MRT_PATH) и сделать активным."""
-    global _ACTIVE_MRT
+def _find_mrt_file(name: str) -> Path | None:
+    """Найти .mrt по имени (в dashboards/ или рядом с MRT_PATH) без смены активного."""
     want = Path(str(name or "").strip().replace("\\", "/")).name
     if not want:
         return active_mrt()
@@ -319,25 +324,41 @@ def _select_mrt(name: str) -> Path | None:
     for d in (dashboards_dir(), MRT_PATH.parent, ROOT / "local"):
         if d not in search_dirs:
             search_dirs.append(d)
-    cand: Path | None = None
     for d in search_dirs:
         if not d.is_dir():
             continue
         direct = d / want
         if direct.is_file() and direct.suffix.lower() == ".mrt":
-            cand = direct
-            break
+            return direct
         for p in sorted(d.glob("*.mrt")):
             if p.name.lower() == want_l or p.stem.lower() == want_stem:
-                cand = p
-                break
-        if cand is not None:
-            break
+                return p
+    return None
+
+
+def _select_mrt(name: str) -> Path | None:
+    """Найти .mrt по имени и сделать активным."""
+    global _ACTIVE_MRT
+    cand = _find_mrt_file(name)
     if cand is None or not cand.is_file():
         return None
     with _STATE_LOCK:
         _ACTIVE_MRT = cand
     return cand
+
+
+def _preview_for_mrt(mrt_path: Path) -> Path | None:
+    """Найти превью-картинку (.png/.jpg/.jpeg/.webp) рядом с .mrt."""
+    stem_l = mrt_path.stem.lower()
+    for ext in _PREVIEW_EXT:
+        cand = mrt_path.with_suffix(ext)
+        if cand.is_file():
+            return cand
+    if mrt_path.parent.is_dir():
+        for p in sorted(mrt_path.parent.iterdir()):
+            if p.is_file() and p.stem.lower() == stem_l and p.suffix.lower() in _PREVIEW_EXT:
+                return p
+    return None
 
 
 def begin_process_data(args: StiDataEventArgs) -> None:
@@ -1590,6 +1611,28 @@ def api_screenshot():
         return jsonify({"ok": False, "error": str(exc)}), 500
     print(f"screenshot saved: {out.resolve()}", flush=True)
     return jsonify({"ok": True, "name": out.name, "path": str(out.resolve())})
+
+
+@app.get("/dashboards/preview")
+def dashboard_preview():
+    """Превью-картинка из dashboards/ с тем же именем, что и .mrt."""
+    raw_name = (request.args.get("mrt") or "").strip()
+    if not raw_name:
+        return jsonify({"ok": False, "error": "нужно имя .mrt"}), 404
+    mrt_file = _find_mrt_file(raw_name)
+    if mrt_file is None:
+        return jsonify({"ok": False, "error": "нет такого .mrt"}), 404
+    shot = _preview_for_mrt(mrt_file)
+    if shot is None:
+        return jsonify({"ok": False, "error": "нет снимка"}), 404
+    media = _PREVIEW_EXT[shot.suffix.lower()]
+    if request.method == "HEAD":
+        resp = Response(b"", mimetype=media)
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+    resp = Response(shot.read_bytes(), mimetype=media)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.get("/exports/<path:name>")
