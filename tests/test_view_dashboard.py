@@ -171,14 +171,17 @@ class ViewDashboardTests(unittest.TestCase):
                 rendered["Dictionary"]["Variables"]["0"]["Value"], "2"
             )
 
-    def test_get_filters_and_heuristic_pick_without_llm(self) -> None:
+    def test_post_filters_and_heuristic_pick_without_llm(self) -> None:
         with mock.patch.object(vd, "ROOT", self.base), mock.patch.object(
             pd_mod, "ROOT", self.base
         ), mock.patch.object(pd_mod, "llm_configured", return_value=False):
-            # GET /filters?mrt=demo.mrt remains 100% compatible with case-3
-            get_resp = self.client.get("/filters?mrt=demo.mrt&run_queries=0")
-            self.assertEqual(get_resp.status_code, 200)
-            gbody = get_resp.get_json()
+            # POST /filters with {mrt} returns catalog for that mrt
+            cat_resp = self.client.post(
+                "/filters",
+                json={"mrt": "demo.mrt", "run_queries": False},
+            )
+            self.assertEqual(cat_resp.status_code, 200)
+            gbody = cat_resp.get_json()
             self.assertEqual(gbody["mrt"], "demo.mrt")
             self.assertEqual(gbody["count"], 2)
 

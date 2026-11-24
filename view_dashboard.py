@@ -1680,7 +1680,7 @@ def dashboard_preview():
     return resp
 
 
-@app.route("/filters", methods=["GET", "POST"])
+@app.post("/filters")
 def filters():
     """Фильтры из .mrt.
 
@@ -1700,23 +1700,13 @@ def filters():
         resolve_dashboard,
     )
 
-    body = (request.get_json(silent=True) or {}) if request.method == "POST" else {}
+    body = request.get_json(silent=True) or {}
     if not isinstance(body, dict):
         body = {}
-    question = str(body.get("question") or request.args.get("question") or "").strip()
+    question = str(body.get("question") or "").strip()
     # пустой mrt → LLM pick; заполненный → только filters/result по этому файлу
-    mrt_arg = str(
-        body.get("mrt")
-        or body.get("dashboard")
-        or request.args.get("mrt")
-        or request.args.get("dashboard")
-        or ""
-    ).strip()
-    rq = (
-        body.get("run_queries", True)
-        if "run_queries" in body
-        else (request.args.get("run_queries") or request.args.get("sql") or True)
-    )
+    mrt_arg = str(body.get("mrt") or body.get("dashboard") or "").strip()
+    rq = body.get("run_queries", True)
     run_queries = str(rq).strip().lower() not in {"0", "false", "no", "off"}
 
     dashboard_info: dict[str, object] | None = None
