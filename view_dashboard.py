@@ -54,8 +54,11 @@ RENDER_FILTER_STORE: dict[str, dict[str, object]] = {}
 LATEST_RENDER_FILTERS: dict[str, object] = {}
 # GET /shot → сигнал уже открытому /open (без перезагрузки дашборда)
 _SHOT_LOCK = threading.Lock()
+_STATE_LOCK = threading.Lock()
 _SHOT_RESULTS: dict[str, dict[str, object]] = {}
 _RENDER_QUERY_SKIP = {
+    "mrt",
+    "dashboard",
     "run_queries",
     "sql",
     "filters",
@@ -294,6 +297,48 @@ app.secret_key = (
     or "dash-render-filters-dev"
 )
 
+_ACTIVE_MRT: Path = MRT_PATH
+
+
+def active_mrt() -> Path:
+    with _STATE_LOCK:
+        return _ACTIVE_MRT
+
+
+def _select_mrt(name: str) -> Path | None:
+    """Найти .mrt по имени (в dashboards/ или рядом с MRT_PATH) и сделать активным."""
+    global _ACTIVE_MRT
+    want = Path(str(name or "").strip().replace("\\", "/")).name
+    if not want:
+        return active_mrt()
+    want_l = want.lower()
+    want_stem = want_l[:-4] if want_l.endswith(".mrt") else want_l
+    from pick_dashboard import dashboards_dir
+
+    search_dirs: list[Path] = []
+    for d in (dashboards_dir(), MRT_PATH.parent, ROOT / "local"):
+        if d not in search_dirs:
+            search_dirs.append(d)
+    cand: Path | None = None
+    for d in search_dirs:
+        if not d.is_dir():
+            continue
+        direct = d / want
+        if direct.is_file() and direct.suffix.lower() == ".mrt":
+            cand = direct
+            break
+        for p in sorted(d.glob("*.mrt")):
+            if p.name.lower() == want_l or p.stem.lower() == want_stem:
+                cand = p
+                break
+        if cand is not None:
+            break
+    if cand is None or not cand.is_file():
+        return None
+    with _STATE_LOCK:
+        _ACTIVE_MRT = cand
+    return cand
+
 
 def begin_process_data(args: StiDataEventArgs) -> None:
     args.connectionString = PG_CONN
@@ -492,7 +537,7 @@ def _mrt_variable_list(data: dict) -> list[tuple[str, dict]]:
 
 def _mrt_var_index(mrt_path: Path | None = None) -> dict[str, dict]:
     """name/alias(lower) → {name, alias, type, raw} из текущего .mrt."""
-    path = mrt_path or MRT_PATH
+    path = mrt_path or active_mrt()
     try:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
@@ -721,7 +766,7 @@ def save_report(args: StiReportEventArgs):
     if args.report is None:
         return StiResult.getError("empty report")
     try:
-        MRT_PATH.write_text(
+        active_mrt().write_text(
             json.dumps(args.report, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
@@ -1433,13 +1478,19 @@ def filters():
 
     try:
         if not question:
-            pass
+            if mrt_arg:
+                chosen = _select_mrt(mrt_arg)
+                if chosen is None:
+                    return jsonify({"count": 0, "filters": [], "error": "нет такого .mrt"}), 404
+                mrt_file = chosen
         elif mrt_arg:
             dashboard_info = resolve_dashboard(mrt_arg)
             mrt_file = Path(str(dashboard_info["mrt_path"]))
+            _select_mrt(mrt_file.name)
         else:
             dashboard_info = pick_dashboard(question)
             mrt_file = Path(str(dashboard_info["mrt_path"]))
+            _select_mrt(mrt_file.name)
 
         plan = extract_filters(
             mrt_file,
@@ -1529,7 +1580,7 @@ def api_screenshot():
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     name = _safe_name(
         str(body.get("name") or ""),
-        f"{MRT_PATH.stem}_{stamp}.png",
+        f"{active_mrt().stem}_{stamp}.png",
         str(body.get("ext") or "") or None,
     )
     out = EXPORT_DIR / name
@@ -1539,6 +1590,26 @@ def api_screenshot():
         return jsonify({"ok": False, "error": str(exc)}), 500
     print(f"screenshot saved: {out.resolve()}", flush=True)
     return jsonify({"ok": True, "name": out.name, "path": str(out.resolve())})
+
+
+@app.get("/exports/<path:name>")
+def export_file(name: str):
+    """Скачать сохранённый PNG/PDF из EXPORT_DIR (для Liber API в Docker)."""
+    safe = Path(str(name or "")).name
+    if not safe or safe in {".", ".."} or safe != str(name):
+        return jsonify({"ok": False, "error": "bad file name"}), 404
+    base = EXPORT_DIR.resolve()
+    target = (base / safe).resolve()
+    if target.parent != base or not target.is_file():
+        return jsonify({"ok": False, "error": "file not found"}), 404
+    media = (
+        "application/pdf"
+        if target.suffix.lower() == ".pdf"
+        else ("image/png" if target.suffix.lower() == ".png" else "application/octet-stream")
+    )
+    resp = Response(target.read_bytes(), mimetype=media)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 # Общий сигнал: GET /shot → открытая вкладка /open|/viewer
@@ -1635,7 +1706,7 @@ def api_shot():
 def serve_mrt_render():
     """Шаблон: Value фильтров из session/LATEST (или legacy ?rf=). Без фильтров — сырой .mrt."""
     token = (request.args.get("rf") or "").strip() or None
-    raw = MRT_PATH.read_text(encoding="utf-8-sig")
+    raw = active_mrt().read_text(encoding="utf-8-sig")
     filters = _resolve_filters(token) or {}
     if not filters:
         resp = Response(raw, mimetype="application/json; charset=utf-8")
@@ -1679,17 +1750,40 @@ def viewer():
 
 def _is_stimulsoft_handler_request() -> bool:
     """POST от JS viewer (PrepareVariables / BeginProcessData / …), не наш JSON фильтров."""
-    if request.args.get("sti_event") or request.args.get("event"):
+    if (
+        request.args.get("sti_event")
+        or request.args.get("event")
+        or request.args.get("sti_data")
+    ):
+        return True
+    if request.form and (
+        request.form.get("sti_event") or request.form.get("sti_data")
+    ):
         return True
     raw = request.get_data(cache=True, as_text=False) or b""
     if not raw:
         return False
     try:
-        text = raw.decode("utf-8", errors="ignore").lstrip()
+        text = raw.decode("utf-8", errors="ignore").strip()
     except Exception:
         return False
-    if not text.startswith("{") and not text.startswith("["):
+    if not text:
         return False
+    if not text.startswith("{") and not text.startswith("["):
+        # Stimulsoft JS encryptData=true шифрует POST body как ROT13(base64(JSON)).
+        try:
+            import codecs
+
+            rot = codecs.decode(text, "rot_13")
+            decoded = base64.b64decode(rot.encode("ascii"), validate=False).decode(
+                "utf-8", errors="ignore"
+            ).lstrip()
+            if decoded.startswith("{"):
+                text = decoded
+            else:
+                return False
+        except Exception:
+            return False
     try:
         obj = json.loads(text)
     except json.JSONDecodeError:
@@ -1697,7 +1791,13 @@ def _is_stimulsoft_handler_request() -> bool:
     if not isinstance(obj, dict):
         return False
     # типичные поля handler'а Stimulsoft
-    if obj.get("event") or obj.get("command") or obj.get("viewerId") or obj.get("data"):
+    if (
+        obj.get("event")
+        or obj.get("command")
+        or obj.get("viewerId")
+        or obj.get("data")
+        or obj.get("clientGuid")
+    ):
         return True
     return False
 
@@ -1745,12 +1845,28 @@ def open_dashboard_with_filters():
          → открывает браузер на /open (или ?open=0 без браузера)
     """
     legacy_rf = (request.args.get("rf") or "").strip() or None
-    incoming = _collect_incoming_filters()
     is_handler = _is_stimulsoft_handler_request()
+    asked_mrt = ""
+    if not is_handler:
+        if request.method == "POST":
+            body = request.get_json(silent=True)
+            if isinstance(body, dict) and str(body.get("mrt") or "").strip():
+                asked_mrt = str(body.get("mrt") or "").strip()
+        if not asked_mrt:
+            asked_mrt = (request.args.get("mrt") or "").strip()
+        if asked_mrt and _select_mrt(asked_mrt) is None:
+            return jsonify({"ok": False, "error": "нет такого .mrt", "mrt": asked_mrt}), 404
 
-    if incoming:
-        incoming = _normalize_filters_against_mrt(incoming)
-        _remember_filters(incoming)
+    incoming = _collect_incoming_filters()
+    wants_json = "application/json" in (request.headers.get("Accept") or "")
+
+    if incoming or (request.method == "POST" and not is_handler and (asked_mrt or wants_json)):
+        if incoming:
+            incoming = _normalize_filters_against_mrt(incoming)
+            _remember_filters(incoming)
+        else:
+            LATEST_RENDER_FILTERS.clear()
+            session.pop("render_filters", None)
         if request.method == "POST" and not is_handler:
             view_path = "/open"
             view_url = f"http://{HOST}:{PORT}{view_path}"
@@ -1761,7 +1877,6 @@ def open_dashboard_with_filters():
                     print(f"opened browser: {view_url}", flush=True)
                 except Exception as exc:
                     print(f"browser open failed: {exc}", flush=True)
-            wants_json = "application/json" in (request.headers.get("Accept") or "")
             if wants_json:
                 return jsonify(
                     {
