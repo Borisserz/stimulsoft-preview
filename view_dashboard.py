@@ -384,7 +384,7 @@ if not MRT_PATH.is_file():
 
 HOST = os.environ.get("VIEWER_HOST", "127.0.0.1")
 PORT = int(os.environ.get("VIEWER_PORT", "8040") or "8040")
-OPEN_BROWSER = os.environ.get("VIEWER_OPEN", "1").lower() in {"1", "true", "yes"}
+OPEN_BROWSER = os.environ.get("VIEWER_OPEN", "0").lower() in {"1", "true", "yes"}
 EXPORT_DIR = path_of(os.environ.get("EXPORT_DIR", "exports").strip() or "exports")
 
 _db = os.environ.get("DATABASE_URL", "").strip()
@@ -1262,49 +1262,13 @@ def openapi_spec() -> dict:
         },
         "paths": {
             "/filters": {
-                "get": {
-                    "tags": ["filters"],
-                    "summary": "Список фильтров из .mrt (+ SQL choices)",
-                    "description": (
-                        "Variables с Category «Фильтр(ы)». "
-                        "`choices_from=items` — Keys/Values; "
-                        "`choices_from=query` — SqlCommand DataSource (по умолчанию выполняется)."
-                    ),
-                    "parameters": [
-                        {
-                            "name": "mrt",
-                            "in": "query",
-                            "schema": {"type": "string"},
-                            "description": "Имя .mrt файла (опционально)",
-                        },
-                        {
-                            "name": "run_queries",
-                            "in": "query",
-                            "schema": {
-                                "type": "string",
-                                "enum": ["0", "1", "true", "false"],
-                                "default": "1",
-                            },
-                            "description": "1 — выполнить SQL dialog.source; 0 — только метаданные",
-                        },
-                    ],
-                    "responses": {
-                        "200": {
-                            "description": "Фильтры",
-                            "content": {
-                                "application/json": {
-                                    "schema": {"$ref": "#/components/schemas/FiltersResponse"}
-                                }
-                            },
-                        }
-                    },
-                },
                 "post": {
                     "tags": ["filters"],
-                    "summary": "Фильтры / выбор типа дашборда / сразу /open",
+                    "summary": "Фильтры / pick / result",
                     "description": (
-                        "{} → count+filters. "
-                        "{question} → подбор .mrt по instruction.md + result + подготовка /open."
+                        "{} → count+filters (MRT_PATH). "
+                        "{question} → LLM pick + result. "
+                        "{mrt,question} → без pick, result из вопроса."
                     ),
                     "requestBody": {
                         "required": False,
@@ -1313,10 +1277,16 @@ def openapi_spec() -> dict:
                                 "schema": {
                                     "type": "object",
                                     "properties": {
-                                        "mrt": {"type": "string"},
+                                        "mrt": {
+                                            "type": "string",
+                                            "description": "Уже выбранный .mrt — только вместе с question",
+                                            "example": "demo.mrt",
+                                        },
                                         "question": {"type": "string"},
-                                        "run_queries": {"type": "boolean", "default": True},
-                                        "open": {"type": "boolean"},
+                                        "run_queries": {
+                                            "type": "boolean",
+                                            "default": True,
+                                        },
                                     },
                                 }
                             }
@@ -1324,7 +1294,7 @@ def openapi_spec() -> dict:
                     },
                     "responses": {
                         "200": {
-                            "description": "Фильтры + выбранный дашборд + /open URL",
+                            "description": "Фильтры (+ dashboard при выборе)",
                             "content": {
                                 "application/json": {
                                     "schema": {"$ref": "#/components/schemas/FiltersResponse"}
@@ -1333,6 +1303,18 @@ def openapi_spec() -> dict:
                         }
                     },
                 },
+            },
+            "/dashboards": {
+                "get": {
+                    "tags": ["filters"],
+                    "summary": "Список dashboards/*.md и наличие .mrt",
+                    "responses": {
+                        "200": {
+                            "description": "Каталог",
+                            "content": {"application/json": {"schema": {"type": "object"}}},
+                        }
+                    },
+                }
             },
             "/open": {
                 "get": {
@@ -1478,29 +1460,41 @@ def openapi_spec() -> dict:
                 "FiltersResponse": {
                     "type": "object",
                     "properties": {
-                        "mrt": {"type": "string"},
-                        "kind": {"type": "string", "example": "category_filters"},
                         "count": {"type": "integer"},
-                        "run_queries": {"type": "boolean"},
-                        "database": {"type": "boolean"},
                         "filters": {
                             "type": "array",
                             "items": {"$ref": "#/components/schemas/FilterItem"},
+                        },
+                        "dashboard": {
+                            "type": "object",
+                            "description": "Только при question",
+                            "properties": {
+                                "mrt": {"type": "string"},
+                                "mrt_path": {"type": "string"},
+                                "description": {
+                                    "type": "string",
+                                    "description": (
+                                        "Секция instruction.md про этот .mrt "
+                                        "(заголовок + тело целиком)"
+                                    ),
+                                },
+                            },
+                        },
+                        "result": {
+                            "type": "object",
+                            "description": (
+                                "Только при question: name→value из вопроса, "
+                                "недостающее — дефолты из filters. Готово для POST /open."
+                            ),
+                            "additionalProperties": True,
+                            "example": {"Region": "Брестская", "Year": 2024},
                         },
                     },
                 },
                 "FilterItem": {
                     "type": "object",
                     "properties": {
-                        "index": {"type": "integer"},
-                        "name": {"type": "string"},
                         "alias": {"type": "string"},
-                        "category": {"type": "string", "example": "Фильтры"},
-                        "type": {"type": "string"},
-                        "choices_from": {
-                            "type": "string",
-                            "enum": ["items", "query", "none"],
-                        },
                         "choices": {
                             "type": "array",
                             "items": {
@@ -1508,12 +1502,12 @@ def openapi_spec() -> dict:
                                 "properties": {
                                     "key": {},
                                     "value": {},
+                                    "checked": {"type": "boolean"},
                                 },
                             },
                         },
-                        "sql": {"type": "string"},
-                        "query_ok": {"type": "boolean"},
-                        "query_error": {"type": "string"},
+                        "name": {"type": "string"},
+                        "value": {},
                     },
                 },
                 "RenderRequest": {
@@ -1614,10 +1608,17 @@ def _requested_mrt_name() -> str:
 
 
 @app.get("/dashboards")
-def dashboards():
-    """Every .mrt in local/ and dashboards/. The picker chooses one, then /filters and /open."""
-    from pick_dashboard import _description_from_instruction, load_instruction
+def dashboards_list():
+    """Список .mrt в dashboards/ (и local/) + есть ли instruction.md."""
+    from pick_dashboard import (
+        _description_from_instruction,
+        dashboards_dir,
+        list_mrt_files,
+        load_instruction,
+    )
 
+    base = dashboards_dir()
+    items = list_mrt_files()
     instruction = load_instruction()
     rows = []
     for path in local_mrt_files():
@@ -1632,16 +1633,35 @@ def dashboards():
     resp = jsonify(
         {
             "ok": True,
-            "dashboards": rows,
-            "mrt": active_mrt().name,
-            "mrt_files": [r["name"] for r in rows],
-            "count": len(rows),
+            "dir": str(base.resolve()),
             "instruction": bool(instruction),
             "instruction_preview": (
                 (instruction[:400] + "…") if len(instruction) > 400 else instruction
             ),
+            "count": len(items),
+            "mrt": [d["mrt"] for d in items],
+            "dashboards": rows,
         }
     )
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.get("/exports/<path:name>")
+def export_file(name: str):
+    """Скачать сохранённый PNG/PDF из EXPORT_DIR (для контейнера case-3 backend)."""
+    safe = Path(str(name or "")).name
+    if not safe or safe in {".", ".."} or safe != str(name):
+        return jsonify({"ok": False, "error": "bad file name"}), 404
+    target = (EXPORT_DIR / safe).resolve()
+    if not str(target).startswith(str(EXPORT_DIR.resolve())) or not target.is_file():
+        return jsonify({"ok": False, "error": "file not found"}), 404
+    media = (
+        "application/pdf"
+        if target.suffix.lower() == ".pdf"
+        else _PREVIEW_EXT.get(target.suffix.lower(), "application/octet-stream")
+    )
+    resp = Response(target.read_bytes(), mimetype=media)
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -1662,25 +1682,29 @@ def dashboard_preview():
 
 @app.route("/filters", methods=["GET", "POST"])
 def filters():
-    """Variables с Category «Фильтр(ы)» + подбор типа дашборда по вопросу + сразу /open."""
+    """Фильтры из .mrt.
+
+    Режимы body:
+      {}                    → count+filters из MRT_PATH (или выбранного mrt)
+      {question}            → LLM pick .mrt + result из вопроса
+      {mrt, question}       → дашборд уже выбран, без pick, result из вопроса
+    """
     local_dir = str(ROOT / "local")
     if local_dir not in sys.path:
         sys.path.insert(0, local_dir)
     from filters_mrt import extract_filters
     from pick_dashboard import (
-        _description_from_instruction,
         build_result,
         extract_filter_values,
-        load_instruction,
         pick_dashboard,
         resolve_dashboard,
     )
 
-    body = request.get_json(silent=True) if request.method == "POST" else {}
+    body = (request.get_json(silent=True) or {}) if request.method == "POST" else {}
     if not isinstance(body, dict):
         body = {}
-
     question = str(body.get("question") or request.args.get("question") or "").strip()
+    # пустой mrt → LLM pick; заполненный → только filters/result по этому файлу
     mrt_arg = str(
         body.get("mrt")
         or body.get("dashboard")
@@ -1688,119 +1712,90 @@ def filters():
         or request.args.get("dashboard")
         or ""
     ).strip()
-
-    rq_raw = body.get("run_queries") if "run_queries" in body else (
-        request.args.get("run_queries") or request.args.get("sql") or "1"
+    rq = (
+        body.get("run_queries", True)
+        if "run_queries" in body
+        else (request.args.get("run_queries") or request.args.get("sql") or True)
     )
-    run_queries = str(rq_raw).strip().lower() not in {"0", "false", "no", "off"}
+    run_queries = str(rq).strip().lower() not in {"0", "false", "no", "off"}
 
     dashboard_info: dict[str, object] | None = None
-    path = active_mrt()
-    try:
-        if mrt_arg:
-            chosen = choose_mrt(mrt_arg)
-            if chosen is None:
-                return (
-                    jsonify(
-                        {
-                            "ok": False,
-                            "error": "нет такого .mrt",
-                            "mrt": mrt_arg,
-                            "filters": [],
-                        }
-                    ),
-                    404,
-                )
-            path = chosen
-            if question:
-                dashboard_info = resolve_dashboard(mrt_arg)
-        elif question:
-            dashboard_info = pick_dashboard(question)
-            picked_path = Path(str(dashboard_info["mrt_path"]))
-            if picked_path.is_file():
-                path = picked_path
-                choose_mrt(path.name)
+    mrt_file = active_mrt()
 
-        if dashboard_info is None:
-            instr = load_instruction()
-            dashboard_info = {
-                "id": path.stem,
-                "mrt": path.name,
-                "mrt_path": str(path.resolve()),
-                "title": path.stem,
-                "description": _description_from_instruction(instr, path.name) if instr else "",
-            }
+    try:
+        if not question:
+            if mrt_arg:
+                chosen = choose_mrt(mrt_arg)
+                if chosen is None:
+                    return (
+                        jsonify(
+                            {
+                                "ok": False,
+                                "error": "нет такого .mrt",
+                                "mrt": mrt_arg,
+                                "count": 0,
+                                "filters": [],
+                            }
+                        ),
+                        404,
+                    )
+                mrt_file = chosen
+        elif mrt_arg:
+            dashboard_info = resolve_dashboard(mrt_arg)
+            mrt_file = Path(str(dashboard_info["mrt_path"]))
+            choose_mrt(mrt_file.name)
+        else:
+            dashboard_info = pick_dashboard(question)
+            mrt_file = Path(str(dashboard_info["mrt_path"]))
+            choose_mrt(mrt_file.name)
 
         plan = extract_filters(
-            path,
+            mrt_file,
             run_queries=run_queries,
             database_url=_db or None,
         )
     except Exception as exc:
-        err_payload: dict[str, object] = {
-            "mrt": path.name,
-            "kind": "category_filters",
-            "error": str(exc),
+        payload: dict[str, object] = {
+            "mrt": mrt_file.name,
             "count": 0,
             "filters": [],
+            "error": str(exc),
         }
         if dashboard_info:
-            err_payload["dashboard"] = {
+            payload["dashboard"] = {
                 "mrt": dashboard_info.get("mrt"),
                 "mrt_path": dashboard_info.get("mrt_path"),
-                "title": dashboard_info.get("title"),
                 "description": dashboard_info.get("description"),
             }
-            err_payload["result"] = {}
-        return jsonify(err_payload), 500
+            payload["result"] = {}
+        return jsonify(payload), 500
 
-    plan["mrt"] = path.name
-    plan["dashboard"] = {
-        "mrt": dashboard_info.get("mrt") or path.name,
-        "mrt_path": dashboard_info.get("mrt_path") or str(path.resolve()),
-        "title": dashboard_info.get("title") or path.stem,
-        "description": dashboard_info.get("description") or "",
-        "reason": dashboard_info.get("reason") or "",
+    out: dict[str, object] = {
+        "mrt": mrt_file.name,
+        "count": plan.get("count", 0),
+        "filters": plan.get("filters") or [],
     }
+    if plan.get("mrt_stripped"):
+        out["error"] = plan.get("error")
+        out["mrt_stripped"] = True
 
-    if question:
-        filt_list = list(plan.get("filters") or [])
+    if question and dashboard_info:
+        filt_list = list(out["filters"]) if isinstance(out["filters"], list) else []
         try:
             extracted = extract_filter_values(question, filt_list)
         except Exception as exc:
             print(f"extract_filter_values failed: {exc}", flush=True)
             extracted = {}
-        result_filters = _normalize_filters_against_mrt(
-            build_result(filt_list, extracted),
-            mrt_path=path,
-        )
-        _remember_filters(result_filters)
-        token = _store_render_entry(result_filters, mrt_name=path.name)
-        view_path = f"/open?{urlencode({'mrt': path.name, 'rf': token})}"
-        base_host = (request.host_url or "").rstrip("/") or f"http://{HOST}:{PORT}"
-        view_url = f"{base_host}{view_path}"
+        out["dashboard"] = {
+            "mrt": dashboard_info.get("mrt"),
+            "mrt_path": dashboard_info.get("mrt_path"),
+            "description": dashboard_info.get("description"),
+        }
+        out["result"] = build_result(filt_list, extracted)
 
-        open_param = body.get("open") if "open" in body else request.args.get("open")
-        if open_param is not None:
-            should_open = str(open_param).strip().lower() not in {"0", "false", "no", "off"}
-        else:
-            should_open = request.method == "POST" and OPEN_BROWSER and not app.config.get("TESTING")
-        if should_open:
-            try:
-                webbrowser.open(view_url)
-                print(f"filters opened browser: {view_url}", flush=True)
-            except Exception as exc:
-                print(f"browser open failed: {exc}", flush=True)
-
-        plan["ok"] = True
-        plan["result"] = result_filters
-        plan["path"] = view_path
-        plan["url"] = view_url
-        plan["viewer"] = view_url
-
-    resp = jsonify(plan)
+    resp = jsonify(out)
     resp.headers["Cache-Control"] = "no-store"
-    if plan.get("mrt_stripped"):
+    if out.get("mrt_stripped"):
         return resp, 422
     return resp
 
@@ -2089,12 +2084,12 @@ def _collect_incoming_filters() -> dict[str, object]:
 def open_dashboard_with_filters():
     """Подставить фильтры и открыть уже построенный дашборд (без Submit).
 
-    Отдельно от /viewer (preview с ручным Submit).
+    Отдельно от /viewer (preview с ручным Submit). Без ?rf= в URL.
 
     GET  /open?trendtype=nocumulative&typenum=1000
-    GET  /open?mrt=plain.mrt&rf=...
-    POST /open  JSON {"mrt":"plain.mrt","filters":{...}}
-         → возвращает URL с ?mrt=...&rf=... (или открывает браузер)
+    GET  /open?filters={"trendtype":"nocumulative","typenum":1000}
+    POST /open  JSON {"filters":{"trendtype":"nocumulative","typenum":1000}}
+         → открывает браузер на /open (или ?open=0 без браузера)
     """
     asked = _requested_mrt_name()
     target_mrt: Path | None = None
@@ -2117,10 +2112,12 @@ def open_dashboard_with_filters():
         _remember_filters(incoming)
 
     if request.method == "POST" and not is_handler:
-        token = _store_render_entry(incoming, mrt_name=target_mrt.name)
-        view_path = f"/open?{urlencode({'mrt': target_mrt.name, 'rf': token})}"
-        base_host = (request.host_url or "").rstrip("/") or f"http://{HOST}:{PORT}"
-        view_url = f"{base_host}{view_path}"
+        if not incoming:
+            with _STATE_LOCK:
+                LATEST_RENDER_FILTERS.clear()
+            session.pop("render_filters", None)
+        view_path = "/open"
+        view_url = f"http://{HOST}:{PORT}{view_path}"
         open_flag = (request.args.get("open") or "1").strip().lower()
         if open_flag not in {"0", "false", "no", "off"}:
             try:
@@ -2153,10 +2150,10 @@ def open_dashboard_with_filters():
         filters = _normalize_filters_against_mrt(filters, mrt_path=target_mrt)
         _remember_filters(filters)
 
-    print(f"open mrt={target_mrt.name} filters={filters}", flush=True)
+    print(f"open filters={filters}", flush=True)
     return build_viewer(
         filters=filters,
-        filter_token=legacy_rf,
+        filter_token=None,
         mrt_name=target_mrt.name,
         inject_screenshot=True,
         auto_render=True,
@@ -2171,11 +2168,11 @@ def open_with_filters():
 
 def main() -> None:
     print("Stimulsoft Dashboards.PYTHON 2024.2.2 — official Flask wiring", flush=True)
-    print(f"MRT: {MRT_PATH.resolve()}  (local: {len(local_mrt_files())})", flush=True)
-    print(f"List:     http://{HOST}:{PORT}/dashboards", flush=True)
+    print(f"MRT: {MRT_PATH.resolve()}", flush=True)
     print(f"Designer: http://{HOST}:{PORT}/designer", flush=True)
     print(f"Viewer:   http://{HOST}:{PORT}/viewer   (preview + Submit)", flush=True)
-    print(f"Filters:  http://{HOST}:{PORT}/filters  (GET catalog / POST question → open)", flush=True)
+    print(f"Filters:  POST http://{HOST}:{PORT}/filters  ({{question}} → LLM pick)", flush=True)
+    print(f"Boards:   http://{HOST}:{PORT}/dashboards", flush=True)
     print(f"Open:     http://{HOST}:{PORT}/open     (filters → ready dashboard)", flush=True)
     print(f"Shot:     http://{HOST}:{PORT}/shot     (signal → open tab shoots)", flush=True)
     print(f"Swagger:  http://{HOST}:{PORT}/docs", flush=True)

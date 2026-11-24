@@ -113,11 +113,15 @@ class ViewDashboardTests(unittest.TestCase):
         self.assertIsInstance(body, dict)
         self.assertTrue(body.get("ok"))
         self.assertTrue(body.get("instruction"))
+        self.assertIn("dir", body)
+        self.assertIsInstance(body.get("mrt"), list)
+        self.assertIn("demo.mrt", body["mrt"])
+        self.assertIn("revenue.mrt", body["mrt"])
         names = [row["name"] for row in body.get("dashboards") or []]
         self.assertIn("demo.mrt", names)
         self.assertIn("revenue.mrt", names)
 
-    def test_post_filters_picks_dashboard_and_prepares_open(self) -> None:
+    def test_post_filters_picks_dashboard_and_returns_dash_main_shape(self) -> None:
         def fake_chat(messages, **_kwargs):
             sys_msg = messages[0]["content"]
             if "выбираешь один файл" in sys_msg:
@@ -136,7 +140,7 @@ class ViewDashboardTests(unittest.TestCase):
             vd.webbrowser, "open"
         ) as mock_browser:
             resp = self.client.post(
-                "/filters?open=0",
+                "/filters",
                 json={"question": "покажи выручку за февраль", "run_queries": False},
             )
             self.assertEqual(resp.status_code, 200)
@@ -144,14 +148,23 @@ class ViewDashboardTests(unittest.TestCase):
             self.assertEqual(body["mrt"], "revenue.mrt")
             self.assertEqual(body["dashboard"]["mrt"], "revenue.mrt")
             self.assertIn("Выручка", body["dashboard"]["description"])
-            self.assertEqual(body["result"], {"Month": 2})
-            self.assertIn("/open?mrt=revenue.mrt&rf=", body["path"])
-            self.assertEqual(body["viewer"], body["url"])
+            self.assertEqual(body["result"], {"Month": "2"})
             mock_browser.assert_not_called()
 
-            # Prepared /mrt-render uses the picked revenue.mrt and rf token
-            rf = body["path"].split("rf=")[1].split("&")[0]
-            render_resp = self.client.get(f"/mrt-render?mrt=revenue.mrt&rf={rf}")
+            # POST /open?open=0 with result returns clean /open path
+            open_resp = self.client.post(
+                "/open?open=0",
+                json={"filters": body["result"], "mrt": body["mrt"]},
+                headers={"Accept": "application/json"},
+            )
+            self.assertEqual(open_resp.status_code, 200)
+            obody = open_resp.get_json()
+            self.assertEqual(obody["path"], "/open")
+            self.assertTrue(obody["url"].endswith("/open"))
+            mock_browser.assert_not_called()
+
+            # Prepared /mrt-render uses the picked revenue.mrt and remembered filters
+            render_resp = self.client.get("/mrt-render")
             self.assertEqual(render_resp.status_code, 200)
             rendered = json.loads(render_resp.get_data(as_text=True))
             self.assertEqual(
@@ -167,18 +180,18 @@ class ViewDashboardTests(unittest.TestCase):
             self.assertEqual(get_resp.status_code, 200)
             gbody = get_resp.get_json()
             self.assertEqual(gbody["mrt"], "demo.mrt")
-            self.assertEqual(gbody["dashboard"]["mrt"], "demo.mrt")
             self.assertEqual(gbody["count"], 2)
 
             # POST /filters without LLM falls back to instruction.md keyword matching
             post_resp = self.client.post(
-                "/filters?open=0",
+                "/filters",
                 json={"question": "покажи выручку по месяцам", "run_queries": False},
             )
             self.assertEqual(post_resp.status_code, 200)
             pbody = post_resp.get_json()
             self.assertEqual(pbody["mrt"], "revenue.mrt")
-            self.assertIn("/open?mrt=revenue.mrt&rf=", pbody["path"])
+            self.assertEqual(pbody["dashboard"]["mrt"], "revenue.mrt")
+            self.assertIn("result", pbody)
 
     def test_shot_poll_uses_id_and_since_without_losing_signal(self) -> None:
         shot_out: dict[str, object] = {}
