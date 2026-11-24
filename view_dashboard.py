@@ -134,13 +134,12 @@ def apply_filter_panel_ui(viewer_options) -> None:
     appearance.allowMobileMode = False
     # Stimulsoft: columns = 1 если count <= minParametersCountForMultiColumns (дефолт 5)
     appearance.minParametersCountForMultiColumns = 1
-    # 3 пары в ряд: длинная строка из 8 полей уезжала в горизонтальный скролл.
-    appearance.parametersPanelColumnsCount = 3
+    appearance.parametersPanelColumnsCount = 8
 
 
 def filter_param_width() -> int:
     """Ширина контролов панели фильтров, px. FILTER_PARAM_WIDTH в .env."""
-    raw = (os.environ.get("FILTER_PARAM_WIDTH") or "120").strip() or "120"
+    raw = (os.environ.get("FILTER_PARAM_WIDTH") or "180").strip() or "180"
     try:
         width = int(raw)
     except ValueError:
@@ -155,18 +154,11 @@ def inject_filter_panel_layout(html: str) -> str:
     w = filter_param_width()
     block = (
         "<style id=\"dashFilterPanelLayout\">\n"
-        ".stiJsViewerParametersPanel {\n"
-        "  max-width: 100%;\n"
-        "}\n"
-        ".stiJsViewerParametersPanel td {\n"
-        "  white-space: normal !important;\n"
-        "}\n"
         ".stiJsViewerParametersPanel .stiJsViewerTextBoxDefault input,\n"
         ".stiJsViewerParametersPanel input.stiJsViewerTextBox,\n"
         ".stiJsViewerParametersPanel .stiJsViewerTextBox {\n"
-        f"  min-width: 0 !important;\n"
+        f"  min-width: {w}px !important;\n"
         f"  width: {w}px !important;\n"
-        f"  max-width: 100% !important;\n"
         "}\n"
         ".stiJsViewerParametersPanel [id$=\"MainButtons\"] {\n"
         "  margin-top: 0 !important;\n"
@@ -833,13 +825,11 @@ def build_viewer(
     mrt_name: str | None = None,
     inject_screenshot: bool = True,
     auto_render: bool = False,
-    auto_shot: bool = False,
 ):
     """Собрать StiViewer.
 
-    auto_render=True — /open: сразу дашборд с фильтрами.
-    auto_shot=True — после рендера PNG + PDF таблиц в exports/ (GET /shot).
-    /viewer вызывает с auto_render=False.
+    auto_render=True — /open: сразу дашборд с фильтрами, без Submit.
+    /viewer вызывает с auto_render=False (preview + ручной Submit).
     """
     viewer = StiViewer()
     apply_license(viewer)
@@ -856,8 +846,7 @@ def build_viewer(
     # StiJavaScript всегда клеит `?sti_event=` к handler.url —
     # нельзя писать `/open?rf=…` (получится `?rf=…?sti_event=` → HTML вместо JS → Unexpected token).
     # rf остаётся в /mrt-render?rf= и в session; handler = чистый путь.
-    # /shot тоже ходит в /open (GetResource / Variables).
-    handler_path = "/open" if (auto_render or auto_shot) else "/viewer"
+    handler_path = "/open" if auto_render else "/viewer"
     try:
         viewer.handler._StiBaseHandler__url = handler_path  # noqa: SLF001
     except Exception:
@@ -870,27 +859,22 @@ def build_viewer(
             inject_screenshot=False,
             filter_token=filter_token,
             auto_render=auto_render,
-            auto_shot=auto_shot,
             handler_path=handler_path,
         )
 
     report = StiReport()
-    # /open|/shot → /mrt-render?rf=…&mrt=…; /viewer → сырой шаблон через /mrt-render без rf
-    load_q: dict[str, str] = {}
-    if (auto_render or auto_shot) and filter_token:
-        load_q["rf"] = filter_token
-    if mrt_name:
-        load_q["mrt"] = mrt_name
-    load_url = f"/mrt-render?{urlencode(load_q)}" if load_q else "/mrt-render"
-    report.loadFile(load_url)
+    # /open → /mrt-render?rf=…; /viewer → сырой шаблон через /mrt-render без rf
+    if auto_render and filter_token:
+        report.loadFile(f"/mrt-render?rf={filter_token}")
+    else:
+        report.loadFile("/mrt-render")
     viewer.report = report
     return sti_response(
         viewer,
         inject_screenshot=inject_screenshot,
         filters=filters,
         filter_token=filter_token,
-        auto_render=auto_render or auto_shot,
-        auto_shot=auto_shot,
+        auto_render=auto_render,
         handler_path=handler_path,
     )
 
@@ -923,10 +907,8 @@ def sti_process(component) -> bool:
     return handled
 
 
-def inject_screenshot_ui(
-    html: str, *, auto_render: bool = False, auto_shot: bool = False
-) -> str:
-    """Скрипт скрина (+ опц. кнопка) и window.__dashReport для bake карт."""
+def inject_screenshot_ui(html: str, *, auto_render: bool = False) -> str:
+    """Скрипт скрина (poll GET /shot) и window.__dashReport для bake карт."""
     needle = "viewer.report = report;\nviewer.renderHtml('viewerContent');"
     auto_block = ""
     auto_submit_js = ""
@@ -1138,21 +1120,7 @@ def inject_screenshot_ui(
         ver = int((ROOT / "screenshot_dashboard.js").stat().st_mtime)
     except OSError:
         ver = 1
-    show_btn = (os.environ.get("SHOT_SHOW_BUTTON") or "0").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    flag_parts = []
-    if show_btn:
-        flag_parts.append("window.__dashShowShotButton=true;")
-    if auto_shot:
-        flag_parts.append("window.__dashAutoShot=true;")
-    flags = (
-        f"<script>{''.join(flag_parts)}</script>\n" if flag_parts else ""
-    )
-    tag = flags + f'<script src="/screenshot-dashboard.js?v={ver}"></script>\n'
+    tag = f'<script src="/screenshot-dashboard.js?v={ver}"></script>\n'
     if "screenshot-dashboard.js" not in html:
         if "</body>" in html:
             html = html.replace("</body>", tag + "</body>", 1)
@@ -1204,7 +1172,6 @@ def sti_response(
     filters: dict[str, object] | None = None,
     filter_token: str | None = None,
     auto_render: bool = False,
-    auto_shot: bool = False,
     handler_path: str = "/open",
 ):
     component.handler.framework = StiFrameworkType.FLASK
@@ -1218,9 +1185,7 @@ def sti_response(
         if isinstance(raw, str) and ("viewerContent" in raw or "StiViewer" in raw):
             # сначала __dashFilters, потом патч renderHtml (auto_render)
             html = inject_filter_values_js(raw, filters, auto_render=auto_render)
-            html = inject_screenshot_ui(
-                html, auto_render=auto_render, auto_shot=auto_shot
-            )
+            html = inject_screenshot_ui(html, auto_render=auto_render)
             html = inject_handler_url(html, filter_token, handler_path=handler_path)
             html = inject_filter_panel_layout(html)
             resp.set_data(html)
@@ -1819,8 +1784,9 @@ def api_screenshot():
     return jsonify({"ok": True, "name": out.name, "path": str(out.resolve())})
 
 
-# Общий сигнал: GET /shot без параметров → любая открытая вкладка /open|/viewer
-_SHOT_GLOBAL_KEY = "*"
+# Общий сигнал: GET /shot → открытая вкладка /open|/viewer
+# pending не снимаем на poll (иначе сигнал терялся) — только на shot-done / timeout
+_SHOT_STATE: dict[str, object] = {"id": None, "at": 0.0}
 
 
 def _shot_wait_ms() -> int:
@@ -1831,87 +1797,62 @@ def _shot_wait_ms() -> int:
         return 90000
 
 
-def _shot_key_from_request() -> str:
-    return (request.args.get("mrt") or "").strip() or _SHOT_GLOBAL_KEY
-
-
 @app.get("/api/shot-poll")
 def api_shot_poll():
-    """Long-poll: ждёт сигнал GET /shot до ~25с. Pending не снимает — только shot-done/timeout."""
-    tab_key = _shot_key_from_request()
+    """Long-poll: ждёт сигнал GET /shot до ~25с. Pending не снимает."""
     since = (request.args.get("since") or "").strip() or None
     deadline = time.time() + 25.0
-    max_age = (_shot_wait_ms() / 1000.0) + 15.0
     while time.time() < deadline:
-        now = time.time()
         with _SHOT_LOCK:
-            for cand in (
-                (tab_key,) if tab_key == _SHOT_GLOBAL_KEY else (tab_key, _SHOT_GLOBAL_KEY)
-            ):
-                entry = _SHOT_PENDING.get(cand)
-                if not isinstance(entry, dict):
-                    continue
-                at = float(entry.get("at") or 0.0)
-                if at and (now - at) > max_age:
-                    _SHOT_PENDING.pop(cand, None)
-                    continue
-                sid = str(entry.get("id") or "").strip()
-                if sid and sid != since:
-                    return jsonify({"shoot": True, "id": sid, "key": cand})
+            sid = _SHOT_STATE.get("id")
+            if sid and sid != since:
+                return jsonify({"shoot": True, "id": sid})
         time.sleep(0.1)
     return jsonify({"shoot": False, "id": None})
 
 
 @app.post("/api/shot-done")
 def api_shot_done():
-    """Вкладка отдала результат скрина на GET /shot; снимает pending по id."""
+    """Вкладка отдала результат; снимаем pending."""
     body = request.get_json(silent=True) or {}
     if not isinstance(body, dict):
         body = {"ok": False, "error": "bad body"}
-    sid = str(body.get("id") or "").strip() or None
-    res_key = (
-        str(body.get("key") or request.args.get("key") or request.args.get("mrt") or "").strip()
-        or _SHOT_GLOBAL_KEY
-    )
+    sid = body.get("id")
     with _SHOT_LOCK:
-        target_key = res_key
-        if target_key not in _SHOT_PENDING and _SHOT_GLOBAL_KEY in _SHOT_PENDING:
-            target_key = _SHOT_GLOBAL_KEY
-        entry = _SHOT_PENDING.get(target_key)
-        if isinstance(entry, dict) and (not sid or entry.get("id") == sid):
-            _SHOT_PENDING.pop(target_key, None)
-        _SHOT_RESULTS[target_key] = body
+        if sid and _SHOT_STATE.get("id") == sid:
+            _SHOT_STATE["id"] = None
+        elif not sid:
+            _SHOT_STATE["id"] = None
+        _SHOT_RESULTS["*"] = body
     return jsonify({"ok": True})
 
 
 @app.get("/shot")
 def api_shot():
-    """Сигнал открытой вкладке /open (по ?mrt= или любой): скрин + download.
+    """Сигнал открытой вкладке /open: скрин + download, без reload.
 
-    1) Браузер: /open?mrt=...  (вкладка остаётся открытой)
-    2) GET /shot?mrt=...      → вкладка снимает PNG/PDF и скачивает
+    Нужна открытая вкладка /open|/viewer (html2canvas локально, без CDN).
     """
-    key = _shot_key_from_request()
     sid = secrets.token_urlsafe(8)
     with _SHOT_LOCK:
-        _SHOT_PENDING[key] = {"id": sid, "at": time.time()}
-        _SHOT_RESULTS.pop(key, None)
-    print(f"shot signal ({key}) id={sid}", flush=True)
+        _SHOT_STATE["id"] = sid
+        _SHOT_STATE["at"] = time.time()
+        _SHOT_RESULTS.pop("*", None)
+    print(f"shot signal id={sid}", flush=True)
 
     deadline = time.time() + (_shot_wait_ms() / 1000.0)
     result: dict[str, object] | None = None
     while time.time() < deadline:
         with _SHOT_LOCK:
-            if key in _SHOT_RESULTS:
-                result = _SHOT_RESULTS.pop(key)
+            if "*" in _SHOT_RESULTS:
+                result = _SHOT_RESULTS.pop("*")
                 break
         time.sleep(0.15)
 
     if result is None:
         with _SHOT_LOCK:
-            entry = _SHOT_PENDING.get(key)
-            if isinstance(entry, dict) and entry.get("id") == sid:
-                _SHOT_PENDING.pop(key, None)
+            if _SHOT_STATE.get("id") == sid:
+                _SHOT_STATE["id"] = None
         return jsonify(
             {
                 "ok": False,
