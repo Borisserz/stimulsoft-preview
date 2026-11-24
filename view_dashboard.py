@@ -25,7 +25,7 @@ import time
 import webbrowser
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import quote_plus, urlencode, urlparse
+from urllib.parse import quote_plus, urlparse
 
 import stimulsoft_dashboards  # noqa: F401 — подтягивает dashboards.js
 from flask import Flask, Response, jsonify, request, session
@@ -54,11 +54,8 @@ RENDER_FILTER_STORE: dict[str, dict[str, object]] = {}
 LATEST_RENDER_FILTERS: dict[str, object] = {}
 # GET /shot → сигнал уже открытому /open (без перезагрузки дашборда)
 _SHOT_LOCK = threading.Lock()
-_SHOT_PENDING: dict[str, dict[str, object]] = {}
 _SHOT_RESULTS: dict[str, dict[str, object]] = {}
 _RENDER_QUERY_SKIP = {
-    "mrt",
-    "dashboard",
     "run_queries",
     "sql",
     "filters",
@@ -69,12 +66,11 @@ _RENDER_QUERY_SKIP = {
     "no_redirect",
     "redirect",
     "open",
-    "autoscreenshot",
-    "shot_ui",
 }
 
 
-def _apply_env_file(path: Path, override: bool) -> None:
+def load_env() -> None:
+    path = ROOT / ".env"
     if not path.is_file():
         return
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -82,17 +78,7 @@ def _apply_env_file(path: Path, override: bool) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, v = line.split("=", 1)
-        key = k.strip()
-        if not override and os.environ.get(key, "").strip():
-            continue
-        os.environ[key] = v.strip().strip("'\"")
-
-
-def load_env() -> None:
-    """Корень, затем local/.env. На работе mrt и env лежат в local/."""
-    _apply_env_file(ROOT / ".env", override=True)
-    _apply_env_file(ROOT / "local" / ".env", override=True)
-    _apply_env_file(ROOT / "local" / "db.env", override=False)
+        os.environ[k.strip()] = v.strip().strip("'\"")
 
 
 def path_of(raw: str) -> Path:
@@ -115,14 +101,7 @@ def apply_license(component) -> None:
     if key:
         component.license.setKey(key)
     elif file_raw:
-        lic = path_of(file_raw)
-        if not lic.is_file():
-            named = ROOT / "local" / Path(file_raw).name
-            if named.is_file():
-                lic = named
-        component.license.setFile(str(lic.resolve()))
-    elif (ROOT / "local" / "license.key").is_file():
-        component.license.setFile(str((ROOT / "local" / "license.key").resolve()))
+        component.license.setFile(str(path_of(file_raw).resolve()))
 
 
 def apply_filter_panel_ui(viewer_options) -> None:
@@ -271,106 +250,13 @@ def inject_filter_panel_layout(html: str) -> str:
 
 load_env()
 
-_PREVIEW_EXT = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".webp": "image/webp",
-}
-
-
-def _mrt_search_dirs() -> list[Path]:
-    dirs: list[Path] = []
-    explicit = (os.environ.get("DASHBOARDS_DIR") or "").strip()
-    if explicit:
-        p = path_of(explicit)
-        dirs.append(p)
-    for cand in (ROOT / "local", ROOT / "dashboards"):
-        if cand not in dirs:
-            dirs.append(cand)
-    return dirs
-
-
-def preview_for_mrt(path: Path) -> Path | None:
-    """The picture next to this .mrt. The file name before the extension must match."""
-    allowed_roots = [d.resolve() for d in _mrt_search_dirs()]
-    for ext in _PREVIEW_EXT:
-        candidate = (path.parent / f"{path.stem}{ext}").resolve()
-        if not any(
-            str(candidate).startswith(str(root)) for root in allowed_roots
-        ):
-            continue
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-def local_mrt_files() -> list[Path]:
-    seen: set[str] = set()
-    found: list[Path] = []
-    for folder in _mrt_search_dirs():
-        if not folder.is_dir():
-            continue
-        for path in sorted(folder.glob("*.mrt")):
-            if not path.is_file():
-                continue
-            key = path.name.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            found.append(path)
-    return found
-
-
-def mrt_by_name(name: str) -> Path | None:
-    """A dashboard file in local/ or dashboards/. The name is the file, not a path."""
-    raw = Path(str(name or "")).name
-    if not raw.lower().endswith(".mrt"):
-        return None
-    for folder in _mrt_search_dirs():
-        root_res = folder.resolve()
-        path = (folder / raw).resolve()
-        if str(path).startswith(str(root_res)) and path.is_file():
-            return path
-    return None
-
-
-def resolve_mrt(raw: str) -> Path | None:
-    if raw:
-        chosen = path_of(raw)
-        if chosen.is_file():
-            return chosen
-        named = mrt_by_name(raw)
-        if named is not None:
-            return named
-        return chosen
-    found = local_mrt_files()
-    if found:
-        return found[0]
-    return None
-
-
 _mrt = os.environ.get("MRT_PATH", "").strip()
-_cli_arg = (
-    sys.argv[1]
-    if (
-        len(sys.argv) > 1
-        and not sys.argv[1].startswith("-")
-        and (
-            __name__ == "__main__"
-            or sys.argv[1].lower().endswith(".mrt")
-        )
-    )
-    else ""
-)
-if _cli_arg:
-    MRT_PATH = resolve_mrt(_cli_arg) or path_of(_cli_arg)
+if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
+    MRT_PATH = path_of(sys.argv[1])
 elif _mrt:
-    MRT_PATH = resolve_mrt(_mrt) or path_of(_mrt)
+    MRT_PATH = path_of(_mrt)
 else:
-    MRT_PATH = resolve_mrt("")
-if MRT_PATH is None:
-    raise SystemExit("Задай MRT_PATH в local/.env или положи .mrt в local/")
+    raise SystemExit("Задай MRT_PATH в .env")
 if not MRT_PATH.is_file():
     raise SystemExit(f"Нет .mrt: {MRT_PATH}")
 
@@ -501,70 +387,28 @@ def _coerce_variable_value(type_name: str | None, value: object) -> object:
     return value
 
 
-_STATE_LOCK = threading.RLock()
-
-
-def _store_render_entry(filters: dict[str, object], *, mrt_name: str = "") -> str:
-    token = secrets.token_urlsafe(12)
-    entry: dict[str, object] = {"mrt": mrt_name, "filters": dict(filters)}
-    with _STATE_LOCK:
-        RENDER_FILTER_STORE[token] = entry
-        # не раздувать память
-        while len(RENDER_FILTER_STORE) > 64:
-            RENDER_FILTER_STORE.pop(next(iter(RENDER_FILTER_STORE)), None)
-    return token
-
-
 def _store_render_filters(filters: dict[str, object]) -> str:
-    return _store_render_entry(filters)
-
-
-def _load_render_entry(token: str | None) -> tuple[str | None, dict[str, object] | None]:
-    if not token:
-        return None, None
-    with _STATE_LOCK:
-        got = RENDER_FILTER_STORE.get(token)
-    if not isinstance(got, dict):
-        return None, None
-    if "filters" in got and isinstance(got.get("filters"), dict):
-        mrt = str(got.get("mrt") or "").strip() or None
-        return mrt, dict(got["filters"])  # type: ignore[arg-type]
-    return None, dict(got)
-
-
-_CHOSEN_MRT: dict[str, str] = {"name": ""}
-
-
-def choose_mrt(name: str) -> Path | None:
-    """Remember which local .mrt the next /open and /mrt-render read."""
-    path = mrt_by_name(name)
-    if path is None:
-        return None
-    with _STATE_LOCK:
-        _CHOSEN_MRT["name"] = path.name
-    return path
-
-
-def active_mrt() -> Path:
-    with _STATE_LOCK:
-        chosen = mrt_by_name(_CHOSEN_MRT.get("name") or "")
-    if chosen is not None:
-        return chosen
-    return MRT_PATH
+    token = secrets.token_urlsafe(12)
+    RENDER_FILTER_STORE[token] = dict(filters)
+    # не раздувать память
+    while len(RENDER_FILTER_STORE) > 64:
+        RENDER_FILTER_STORE.pop(next(iter(RENDER_FILTER_STORE)), None)
+    return token
 
 
 def _remember_filters(filters: dict[str, object]) -> None:
     """Session + last-wins (для /open без ?rf=)."""
     data = dict(filters)
     session["render_filters"] = data
-    with _STATE_LOCK:
-        LATEST_RENDER_FILTERS.clear()
-        LATEST_RENDER_FILTERS.update(data)
+    LATEST_RENDER_FILTERS.clear()
+    LATEST_RENDER_FILTERS.update(data)
 
 
 def _load_render_filters(token: str | None) -> dict[str, object] | None:
-    _, filters = _load_render_entry(token)
-    return filters
+    if not token:
+        return None
+    got = RENDER_FILTER_STORE.get(token)
+    return dict(got) if isinstance(got, dict) else None
 
 
 def _resolve_filters(
@@ -572,12 +416,10 @@ def _resolve_filters(
     incoming: dict[str, object] | None = None,
 ) -> dict[str, object] | None:
     """rf (legacy) → session → LATEST → incoming."""
-    with _STATE_LOCK:
-        latest_snap = dict(LATEST_RENDER_FILTERS)
     for cand in (
         _load_render_filters(token),
         session.get("render_filters"),
-        latest_snap,
+        LATEST_RENDER_FILTERS,
         incoming,
     ):
         if isinstance(cand, dict) and cand:
@@ -585,7 +427,7 @@ def _resolve_filters(
     return None
 
 
-def make_prepare_variables(filters: dict[str, object], *, mrt_path: Path | None = None):
+def make_prepare_variables(filters: dict[str, object]):
     """onPrepareVariables: подставить переданные фильтры перед рендером."""
 
     def prepare_variables(args: StiVariablesEventArgs) -> None:
@@ -600,7 +442,7 @@ def make_prepare_variables(filters: dict[str, object], *, mrt_path: Path | None 
             )
             return
         # name + alias → real variable key
-        index = _mrt_var_index(mrt_path)
+        index = _mrt_var_index()
         by_lower = {str(name).lower(): name for name in variables.keys()}
         ordered = list(variables.items())
         applied = []
@@ -650,7 +492,7 @@ def _mrt_variable_list(data: dict) -> list[tuple[str, dict]]:
 
 def _mrt_var_index(mrt_path: Path | None = None) -> dict[str, dict]:
     """name/alias(lower) → {name, alias, type, raw} из текущего .mrt."""
-    path = mrt_path or active_mrt()
+    path = mrt_path or MRT_PATH
     try:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
@@ -669,13 +511,11 @@ def _mrt_var_index(mrt_path: Path | None = None) -> dict[str, dict]:
     return out
 
 
-def _normalize_filters_against_mrt(
-    filters: dict[str, object], *, mrt_path: Path | None = None
-) -> dict[str, object]:
+def _normalize_filters_against_mrt(filters: dict[str, object]) -> dict[str, object]:
     """alias→name, value под Type (StringList → list, не JSON-строка)."""
     if not filters:
         return {}
-    index = _mrt_var_index(mrt_path)
+    index = _mrt_var_index()
     out: dict[str, object] = {}
     for key, value in filters.items():
         meta = index.get(str(key).lower())
@@ -822,25 +662,23 @@ def build_viewer(
     *,
     filters: dict[str, object] | None = None,
     filter_token: str | None = None,
-    mrt_name: str | None = None,
     inject_screenshot: bool = True,
     auto_render: bool = False,
 ):
     """Собрать StiViewer.
 
-    auto_render=True — /open: сразу дашборд с фильтрами, без Submit.
-    /viewer вызывает с auto_render=False (preview + ручной Submit).
+    auto_render=True — /open: сразу дашборд с фильтрами.
+    /viewer вызывает с auto_render=False.
     """
     viewer = StiViewer()
     apply_license(viewer)
     viewer.options.appearance.fullScreenMode = True
     apply_filter_panel_ui(viewer.options)
     viewer.onBeginProcessData += begin_process_data
-    target_mrt_path = mrt_by_name(mrt_name) if mrt_name else None
     # /open: панель нужна — Submit шлёт postInteraction(Variables), без этого
     # карта остаётся без данных. Кнопку жмём сами в JS после render.
     if filters:
-        viewer.onPrepareVariables += make_prepare_variables(filters, mrt_path=target_mrt_path)
+        viewer.onPrepareVariables += make_prepare_variables(filters)
         # клиентский хук как дополнительный канал
         viewer.onPrepareVariables += "dashApplyFilters"
     # StiJavaScript всегда клеит `?sti_event=` к handler.url —
@@ -883,7 +721,7 @@ def save_report(args: StiReportEventArgs):
     if args.report is None:
         return StiResult.getError("empty report")
     try:
-        active_mrt().write_text(
+        MRT_PATH.write_text(
             json.dumps(args.report, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
@@ -1222,7 +1060,7 @@ def openapi_spec() -> dict:
             "description": (
                 "`/viewer` — preview (панель + Submit). "
                 "`/open` — передал фильтры → сразу готовый дашборд. "
-                f"MRT: `{active_mrt().name}`"
+                f"MRT: `{MRT_PATH.name}`"
             ),
         },
         "paths": {
@@ -1564,99 +1402,15 @@ def vendor_html2canvas():
     return resp
 
 
-def _requested_mrt_name() -> str:
-    if request.method == "POST" and not _is_stimulsoft_handler_request():
-        body = request.get_json(silent=True)
-        if isinstance(body, dict) and str(body.get("mrt") or "").strip():
-            return str(body.get("mrt") or "").strip()
-    return (request.args.get("mrt") or "").strip()
-
-
-@app.get("/dashboards")
-def dashboards_list():
-    """Список .mrt в dashboards/ (и local/) + есть ли instruction.md."""
-    from pick_dashboard import (
-        _description_from_instruction,
-        dashboards_dir,
-        list_mrt_files,
-        load_instruction,
-    )
-
-    base = dashboards_dir()
-    items = list_mrt_files()
-    instruction = load_instruction()
-    rows = []
-    for path in local_mrt_files():
-        row: dict[str, str] = {"name": path.name, "title": path.stem}
-        shot = preview_for_mrt(path)
-        if shot is not None:
-            row["preview"] = shot.name
-        desc = _description_from_instruction(instruction, path.name) if instruction else ""
-        if desc:
-            row["description"] = desc
-        rows.append(row)
-    resp = jsonify(
-        {
-            "ok": True,
-            "dir": str(base.resolve()),
-            "instruction": bool(instruction),
-            "instruction_preview": (
-                (instruction[:400] + "…") if len(instruction) > 400 else instruction
-            ),
-            "count": len(items),
-            "mrt": [d["mrt"] for d in items],
-            "dashboards": rows,
-        }
-    )
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
-
-
-@app.get("/exports/<path:name>")
-def export_file(name: str):
-    """Скачать сохранённый PNG/PDF из EXPORT_DIR (для контейнера case-3 backend)."""
-    safe = Path(str(name or "")).name
-    if not safe or safe in {".", ".."} or safe != str(name):
-        return jsonify({"ok": False, "error": "bad file name"}), 404
-    target = (EXPORT_DIR / safe).resolve()
-    if not str(target).startswith(str(EXPORT_DIR.resolve())) or not target.is_file():
-        return jsonify({"ok": False, "error": "file not found"}), 404
-    media = (
-        "application/pdf"
-        if target.suffix.lower() == ".pdf"
-        else _PREVIEW_EXT.get(target.suffix.lower(), "application/octet-stream")
-    )
-    resp = Response(target.read_bytes(), mimetype=media)
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
-
-
-@app.get("/dashboards/preview")
-def dashboard_preview():
-    """PNG/JPEG/WebP whose name matches the chosen .mrt."""
-    path = mrt_by_name((request.args.get("mrt") or "").strip())
-    if path is None:
-        return jsonify({"ok": False, "error": "нет такого .mrt"}), 404
-    shot = preview_for_mrt(path)
-    if shot is None:
-        return jsonify({"ok": False, "error": "нет снимка"}), 404
-    resp = Response(shot.read_bytes(), mimetype=_PREVIEW_EXT[shot.suffix.lower()])
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
-
-
 @app.post("/filters")
 def filters():
     """Фильтры из .mrt.
 
     Режимы body:
-      {}                    → count+filters из MRT_PATH (или выбранного mrt)
+      {}                    → count+filters из MRT_PATH
       {question}            → LLM pick .mrt + result из вопроса
       {mrt, question}       → дашборд уже выбран, без pick, result из вопроса
     """
-    local_dir = str(ROOT / "local")
-    if local_dir not in sys.path:
-        sys.path.insert(0, local_dir)
     from filters_mrt import extract_filters
     from pick_dashboard import (
         build_result,
@@ -1675,34 +1429,17 @@ def filters():
     run_queries = str(rq).strip().lower() not in {"0", "false", "no", "off"}
 
     dashboard_info: dict[str, object] | None = None
-    mrt_file = active_mrt()
+    mrt_file = MRT_PATH
 
     try:
         if not question:
-            if mrt_arg:
-                chosen = choose_mrt(mrt_arg)
-                if chosen is None:
-                    return (
-                        jsonify(
-                            {
-                                "ok": False,
-                                "error": "нет такого .mrt",
-                                "mrt": mrt_arg,
-                                "count": 0,
-                                "filters": [],
-                            }
-                        ),
-                        404,
-                    )
-                mrt_file = chosen
+            pass
         elif mrt_arg:
             dashboard_info = resolve_dashboard(mrt_arg)
             mrt_file = Path(str(dashboard_info["mrt_path"]))
-            choose_mrt(mrt_file.name)
         else:
             dashboard_info = pick_dashboard(question)
             mrt_file = Path(str(dashboard_info["mrt_path"]))
-            choose_mrt(mrt_file.name)
 
         plan = extract_filters(
             mrt_file,
@@ -1711,7 +1448,6 @@ def filters():
         )
     except Exception as exc:
         payload: dict[str, object] = {
-            "mrt": mrt_file.name,
             "count": 0,
             "filters": [],
             "error": str(exc),
@@ -1726,7 +1462,6 @@ def filters():
         return jsonify(payload), 500
 
     out: dict[str, object] = {
-        "mrt": mrt_file.name,
         "count": plan.get("count", 0),
         "filters": plan.get("filters") or [],
     }
@@ -1755,6 +1490,28 @@ def filters():
     return resp
 
 
+@app.get("/dashboards")
+def dashboards_list():
+    """Список .mrt в dashboards/ + есть ли instruction.md."""
+    from pick_dashboard import dashboards_dir, list_mrt_files, load_instruction
+
+    base = dashboards_dir()
+    items = list_mrt_files(base)
+    instruction = load_instruction(base)
+    return jsonify(
+        {
+            "ok": True,
+            "dir": str(base.resolve()),
+            "instruction": bool(instruction),
+            "instruction_preview": (instruction[:400] + "…")
+            if len(instruction) > 400
+            else instruction,
+            "count": len(items),
+            "mrt": [d["mrt"] for d in items],
+        }
+    )
+
+
 @app.post("/api/screenshot")
 def api_screenshot():
     """Сохраняет PNG/CSV (и др.) из viewer в EXPORT_DIR."""
@@ -1772,7 +1529,7 @@ def api_screenshot():
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     name = _safe_name(
         str(body.get("name") or ""),
-        f"{active_mrt().stem}_{stamp}.png",
+        f"{MRT_PATH.stem}_{stamp}.png",
         str(body.get("ext") or "") or None,
     )
     out = EXPORT_DIR / name
@@ -1876,16 +1633,10 @@ def api_shot():
 
 @app.route("/mrt-render", methods=["GET", "POST"])
 def serve_mrt_render():
-    """Шаблон: Value фильтров из ?rf=/session/LATEST и шаблон из ?mrt=/active_mrt()."""
+    """Шаблон: Value фильтров из session/LATEST (или legacy ?rf=). Без фильтров — сырой .mrt."""
     token = (request.args.get("rf") or "").strip() or None
-    asked_mrt = _requested_mrt_name()
-    tok_mrt, tok_filters = _load_render_entry(token)
-    chosen_name = asked_mrt or (tok_mrt or "")
-    target_mrt = mrt_by_name(chosen_name) if chosen_name else None
-    if target_mrt is None:
-        target_mrt = active_mrt()
-    raw = target_mrt.read_text(encoding="utf-8-sig")
-    filters = tok_filters if tok_filters is not None else (_resolve_filters(token) or {})
+    raw = MRT_PATH.read_text(encoding="utf-8-sig")
+    filters = _resolve_filters(token) or {}
     if not filters:
         resp = Response(raw, mimetype="application/json; charset=utf-8")
         resp.headers["Cache-Control"] = "no-store"
@@ -1928,40 +1679,17 @@ def viewer():
 
 def _is_stimulsoft_handler_request() -> bool:
     """POST от JS viewer (PrepareVariables / BeginProcessData / …), не наш JSON фильтров."""
-    if (
-        request.args.get("sti_event")
-        or request.args.get("event")
-        or request.args.get("sti_data")
-    ):
-        return True
-    if request.form and (
-        request.form.get("sti_event") or request.form.get("sti_data")
-    ):
+    if request.args.get("sti_event") or request.args.get("event"):
         return True
     raw = request.get_data(cache=True, as_text=False) or b""
     if not raw:
         return False
     try:
-        text = raw.decode("utf-8", errors="ignore").strip()
+        text = raw.decode("utf-8", errors="ignore").lstrip()
     except Exception:
         return False
-    if not text:
-        return False
     if not text.startswith("{") and not text.startswith("["):
-        # Stimulsoft JS encrypts handler POST bodies as ROT13(base64(JSON)).
-        try:
-            import codecs
-
-            rot = codecs.decode(text, "rot_13")
-            decoded = base64.b64decode(rot.encode("ascii"), validate=False).decode(
-                "utf-8", errors="ignore"
-            ).lstrip()
-            if decoded.startswith("{"):
-                text = decoded
-            else:
-                return False
-        except Exception:
-            return False
+        return False
     try:
         obj = json.loads(text)
     except json.JSONDecodeError:
@@ -1969,13 +1697,7 @@ def _is_stimulsoft_handler_request() -> bool:
     if not isinstance(obj, dict):
         return False
     # типичные поля handler'а Stimulsoft
-    if (
-        obj.get("event")
-        or obj.get("command")
-        or obj.get("viewerId")
-        or obj.get("data")
-        or obj.get("clientGuid")
-    ):
+    if obj.get("event") or obj.get("command") or obj.get("viewerId") or obj.get("data"):
         return True
     return False
 
@@ -2022,70 +1744,51 @@ def open_dashboard_with_filters():
     POST /open  JSON {"filters":{"trendtype":"nocumulative","typenum":1000}}
          → открывает браузер на /open (или ?open=0 без браузера)
     """
-    asked = _requested_mrt_name()
-    target_mrt: Path | None = None
-    if asked:
-        target_mrt = choose_mrt(asked)
-        if target_mrt is None:
-            return jsonify({"ok": False, "error": "нет такого .mrt", "mrt": asked}), 404
     legacy_rf = (request.args.get("rf") or "").strip() or None
-    tok_mrt, tok_filters = _load_render_entry(legacy_rf)
-    if target_mrt is None and tok_mrt:
-        target_mrt = mrt_by_name(tok_mrt)
-    if target_mrt is None:
-        target_mrt = active_mrt()
-
     incoming = _collect_incoming_filters()
     is_handler = _is_stimulsoft_handler_request()
 
     if incoming:
-        incoming = _normalize_filters_against_mrt(incoming, mrt_path=target_mrt)
+        incoming = _normalize_filters_against_mrt(incoming)
         _remember_filters(incoming)
-
-    if request.method == "POST" and not is_handler:
-        if not incoming:
-            with _STATE_LOCK:
-                LATEST_RENDER_FILTERS.clear()
-            session.pop("render_filters", None)
-        view_path = "/open"
-        view_url = f"http://{HOST}:{PORT}{view_path}"
-        open_flag = (request.args.get("open") or "1").strip().lower()
-        if open_flag not in {"0", "false", "no", "off"}:
-            try:
-                webbrowser.open(view_url)
-                print(f"opened browser: {view_url}", flush=True)
-            except Exception as exc:
-                print(f"browser open failed: {exc}", flush=True)
-        wants_json = "application/json" in (request.headers.get("Accept") or "")
-        if wants_json:
-            return jsonify(
-                {
-                    "ok": True,
-                    "url": view_url,
-                    "path": view_path,
-                    "filters": incoming,
-                    "mrt": target_mrt.name,
-                }
+        if request.method == "POST" and not is_handler:
+            view_path = "/open"
+            view_url = f"http://{HOST}:{PORT}{view_path}"
+            open_flag = (request.args.get("open") or "1").strip().lower()
+            if open_flag not in {"0", "false", "no", "off"}:
+                try:
+                    webbrowser.open(view_url)
+                    print(f"opened browser: {view_url}", flush=True)
+                except Exception as exc:
+                    print(f"browser open failed: {exc}", flush=True)
+            wants_json = "application/json" in (request.headers.get("Accept") or "")
+            if wants_json:
+                return jsonify(
+                    {
+                        "ok": True,
+                        "url": view_url,
+                        "path": view_path,
+                        "filters": incoming,
+                    }
+                )
+            html = (
+                "<!doctype html><meta charset=utf-8>"
+                f"<meta http-equiv=refresh content='0;url={view_path}'>"
+                "<title>Opening dashboard…</title>"
+                "<p>Открываю дашборд с фильтрами… "
+                f"<a href='{view_path}'>{view_url}</a></p>"
             )
-        html = (
-            "<!doctype html><meta charset=utf-8>"
-            f"<meta http-equiv=refresh content='0;url={view_path}'>"
-            "<title>Opening dashboard…</title>"
-            "<p>Открываю дашборд с фильтрами… "
-            f"<a href='{view_path}'>{view_url}</a></p>"
-        )
-        return Response(html, mimetype="text/html; charset=utf-8")
+            return Response(html, mimetype="text/html; charset=utf-8")
 
-    filters = tok_filters if tok_filters is not None else _resolve_filters(legacy_rf, incoming)
+    filters = _resolve_filters(legacy_rf, incoming)
     if filters:
-        filters = _normalize_filters_against_mrt(filters, mrt_path=target_mrt)
+        filters = _normalize_filters_against_mrt(filters)
         _remember_filters(filters)
 
     print(f"open filters={filters}", flush=True)
     return build_viewer(
         filters=filters,
         filter_token=None,
-        mrt_name=target_mrt.name,
         inject_screenshot=True,
         auto_render=True,
     )

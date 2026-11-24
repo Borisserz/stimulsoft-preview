@@ -1,7 +1,11 @@
 """Выбор .mrt по вопросу: инструкция (.md) → LLM → имя mrt → дальше filters/open.
 
-Поддерживает как папку ``dashboards/`` (или ``DASHBOARDS_DIR``), так и рабочую
-папку ``local/`` (где на деске лежат ``.mrt`` и опционально ``instruction.md``).
+Структура:
+  dashboards/
+    instruction.md   ← инструкция/промпт (как выбирать)
+    demo.mrt
+    revenue.mrt
+    …
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 
+# правь system-промпт под себя
 PICK_SYSTEM = """Ты выбираешь один файл дашборда (.mrt) по вопросу пользователя.
 
 Тебе даны:
@@ -48,84 +53,52 @@ choices часто из SQL — это и есть допустимые знач
 
 
 def dashboards_dir() -> Path:
-    raw = (os.environ.get("DASHBOARDS_DIR") or "").strip()
-    if raw:
-        p = Path(raw)
-        return p if p.is_absolute() else ROOT / p
-    local_dir = ROOT / "local"
-    if local_dir.is_dir() and any(local_dir.glob("*.mrt")):
-        return local_dir
-    return ROOT / "dashboards"
+    raw = (os.environ.get("DASHBOARDS_DIR") or "dashboards").strip() or "dashboards"
+    p = Path(raw)
+    return p if p.is_absolute() else ROOT / p
 
 
 DASHBOARDS_DIR = dashboards_dir()
 
 
-def _candidate_dirs(dir_path: Path | None = None) -> list[Path]:
-    if dir_path is not None:
-        return [dir_path]
-    dirs: list[Path] = []
-    explicit = (os.environ.get("DASHBOARDS_DIR") or "").strip()
-    if explicit:
-        p = Path(explicit)
-        dirs.append(p if p.is_absolute() else ROOT / p)
-    for cand in (ROOT / "local", ROOT / "dashboards"):
-        if cand not in dirs:
-            dirs.append(cand)
-    return dirs
-
-
 def list_mrt_files(dir_path: Path | None = None) -> list[dict[str, object]]:
-    """Доступные .mrt в local/ и dashboards/ (без дубликатов по имени, local/ приоритетнее)."""
-    seen: set[str] = set()
+    """Доступные .mrt в папке dashboards/."""
+    base = dir_path or dashboards_dir()
+    if not base.is_dir():
+        return []
     out: list[dict[str, object]] = []
-    for base in _candidate_dirs(dir_path):
-        if not base.is_dir():
-            continue
-        for mrt in sorted(base.glob("*.mrt")):
-            key = mrt.name.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(
-                {
-                    "mrt": mrt.name,
-                    "mrt_path": str(mrt.resolve()),
-                    "id": mrt.stem,
-                }
-            )
+    for mrt in sorted(base.glob("*.mrt")):
+        out.append(
+            {
+                "mrt": mrt.name,
+                "mrt_path": str(mrt.resolve()),
+                "id": mrt.stem,
+            }
+        )
     return out
 
 
 def load_instruction(dir_path: Path | None = None) -> str:
-    """Инструкция для LLM: instruction.md в local/ или dashboards/, иначе *.md."""
-    for base in _candidate_dirs(dir_path):
-        if not base.is_dir():
-            continue
-        preferred = base / "instruction.md"
-        if preferred.is_file():
-            text = preferred.read_text(encoding="utf-8").strip()
-            if text:
-                return text
+    """Инструкция для LLM: instruction.md, иначе все *.md склеенные."""
+    base = dir_path or dashboards_dir()
+    if not base.is_dir():
+        return ""
+    preferred = base / "instruction.md"
+    if preferred.is_file():
+        return preferred.read_text(encoding="utf-8").strip()
     parts: list[str] = []
-    for base in _candidate_dirs(dir_path):
-        if not base.is_dir():
+    for md in sorted(base.glob("*.md")):
+        if md.name.lower() == "readme.md":
             continue
-        for md in sorted(base.glob("*.md")):
-            if md.name.lower() == "readme.md":
-                continue
-            body = md.read_text(encoding="utf-8").strip()
-            if body:
-                parts.append(body)
-        if parts:
-            return "\n\n---\n\n".join(parts).strip()
-    return ""
+        parts.append(md.read_text(encoding="utf-8").strip())
+    return "\n\n---\n\n".join(parts).strip()
 
 
 def list_dashboards(dir_path: Path | None = None) -> list[dict[str, object]]:
     """Каталог для /dashboards: mrt + есть ли instruction."""
-    instruction = load_instruction(dir_path)
-    items = list_mrt_files(dir_path)
+    base = dir_path or dashboards_dir()
+    instruction = load_instruction(base)
+    items = list_mrt_files(base)
     return [
         {
             **item,
@@ -143,57 +116,30 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 def _llm_config() -> dict[str, object]:
-    max_tokens_raw = (
-        os.environ.get("LLM_MAX_TOKENS") or os.environ.get("VISION_MAX_TOKENS") or ""
-    ).strip()
+    max_tokens_raw = os.environ.get("LLM_MAX_TOKENS", "").strip()
     max_tokens: int | None
     try:
         max_tokens = int(max_tokens_raw) if max_tokens_raw else None
     except ValueError:
         max_tokens = None
-
-    base = (
-        os.environ.get("LLM_BASE_URL")
-        or os.environ.get("VISION_API_BASE_URL")
-        or "http://127.0.0.1:8080/v1"
-    ).strip().rstrip("/")
-    if not base.endswith("/v1") and not base.endswith("/chat/completions"):
-        base = base + "/v1"
-
-    api_key = (
-        os.environ.get("LLM_API_KEY") or os.environ.get("VISION_API_KEY") or ""
-    ).strip()
-    if "," in api_key:
-        api_key = api_key.split(",", 1)[0].strip()
-
-    model = (
-        os.environ.get("LLM_MODEL") or os.environ.get("VISION_MODEL") or ""
-    ).strip()
-
-    raw_reasoning = os.environ.get("LLM_REASONING", "").strip()
-    if not raw_reasoning:
-        raw_reasoning = os.environ.get("VISION_REASONING", "").strip()
-
     return {
-        "base_url": base,
-        "api_key": api_key,
-        "model": model,
+        "base_url": (
+            os.environ.get("LLM_BASE_URL", "http://127.0.0.1:8080/v1").strip().rstrip("/")
+        ),
+        "api_key": os.environ.get("LLM_API_KEY", "").strip(),
+        "model": os.environ.get("LLM_MODEL", "").strip(),
         "timeout": float(os.environ.get("LLM_TIMEOUT", "60") or "60"),
         "max_tokens": max_tokens,
+        # размышление / thinking (Qwen, vLLM, …). None = не трогаем body
         "reasoning": (
             _env_bool("LLM_REASONING", False)
-            if raw_reasoning != ""
+            if os.environ.get("LLM_REASONING", "").strip() != ""
             else None
         ),
         "reasoning_effort": (
             os.environ.get("LLM_REASONING_EFFORT", "medium").strip() or "medium"
         ),
     }
-
-
-def llm_configured() -> bool:
-    cfg = _llm_config()
-    return bool(str(cfg.get("model") or "").strip())
 
 
 def _strip_thinking(text: str) -> str:
@@ -208,9 +154,8 @@ def _chat(messages: list[dict[str, str]], *, temperature: float = 0.1) -> str:
     cfg = _llm_config()
     model = str(cfg["model"] or "")
     if not model:
-        raise RuntimeError("Задай LLM_MODEL (или VISION_MODEL) в .env")
-    base_url = str(cfg["base_url"])
-    url = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
+        raise RuntimeError("Задай LLM_MODEL в .env")
+    url = f"{cfg['base_url']}/chat/completions"
     body: dict[str, object] = {
         "model": model,
         "temperature": temperature,
@@ -218,44 +163,33 @@ def _chat(messages: list[dict[str, str]], *, temperature: float = 0.1) -> str:
     }
     if cfg["max_tokens"] is not None:
         body["max_tokens"] = int(cfg["max_tokens"])
+    # вкл/выкл размышление — только если LLM_REASONING задан в .env
     if cfg["reasoning"] is not None:
         reasoning_on = bool(cfg["reasoning"])
         body["chat_template_kwargs"] = {"enable_thinking": reasoning_on}
         body["reasoning_effort"] = (
             str(cfg["reasoning_effort"]) if reasoning_on else "none"
         )
+    data = json.dumps(body, ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     key = str(cfg["api_key"] or "")
     if key:
         headers["Authorization"] = f"Bearer {key}"
-
-    for attempt in range(2):
-        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=float(cfg["timeout"])) as resp:
-                raw = resp.read().decode("utf-8")
-            break
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:500]
-            if (
-                attempt == 0
-                and exc.code == 400
-                and "reasoning" in detail.lower()
-                and ("reasoning_effort" in body or "chat_template_kwargs" in body)
-            ):
-                body.pop("reasoning_effort", None)
-                body.pop("chat_template_kwargs", None)
-                continue
-            raise RuntimeError(f"LLM HTTP {exc.code}: {detail}") from exc
-        except Exception as exc:
-            raise RuntimeError(f"LLM request failed: {exc}") from exc
-
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=float(cfg["timeout"])) as resp:
+            raw = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(f"LLM HTTP {exc.code}: {detail}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"LLM request failed: {exc}") from exc
     parsed = json.loads(raw)
     try:
         msg = parsed["choices"][0]["message"]
         content = msg.get("content")
         if content in (None, "") and msg.get("reasoning_content"):
+            # некоторые бэкенды кладут ответ только в reasoning — не используем
             content = msg.get("content") or ""
         return _strip_thinking(str(content or ""))
     except (KeyError, IndexError, TypeError) as exc:
@@ -294,10 +228,11 @@ def _find_mrt(
     *,
     dir_path: Path | None = None,
 ) -> dict[str, object]:
-    """Найти .mrt в local/ или dashboards/ по имени (demo / demo.mrt)."""
-    mrt_list = list_mrt_files(dir_path)
+    """Найти .mrt в dashboards/ по имени (demo / demo.mrt)."""
+    base = dir_path or dashboards_dir()
+    mrt_list = list_mrt_files(base)
     if not mrt_list:
-        raise RuntimeError("Нет *.mrt в local/ и dashboards/")
+        raise RuntimeError(f"Нет *.mrt в {base}")
     want = _normalize_mrt_name(mrt_name)
     match = next((x for x in mrt_list if str(x["mrt"]) == want), None)
     if match is None:
@@ -323,8 +258,9 @@ def resolve_dashboard(
     dir_path: Path | None = None,
 ) -> dict[str, object]:
     """Дашборд уже выбран: без LLM, description из instruction.md."""
-    match = _find_mrt(mrt_name, dir_path=dir_path)
-    instruction = load_instruction(dir_path)
+    base = dir_path or dashboards_dir()
+    match = _find_mrt(mrt_name, dir_path=base)
+    instruction = load_instruction(base)
     description = _description_from_instruction(instruction, str(match["mrt"]))
     return {
         "id": match["id"],
@@ -334,95 +270,53 @@ def resolve_dashboard(
         "description": description,
         "reason": "mrt задан клиентом",
         "instruction_used": bool(instruction),
-        "available_mrt": [str(x["mrt"]) for x in list_mrt_files(dir_path)],
+        "available_mrt": [str(x["mrt"]) for x in list_mrt_files(base)],
         "picked": False,
     }
 
 
-def _heuristic_pick(
-    question: str,
-    mrt_list: list[dict[str, object]],
-    instruction: str,
-) -> dict[str, object]:
-    """Fallback-подбор .mrt по ключевым словам из instruction.md / имени файла."""
-    if len(mrt_list) == 1:
-        return mrt_list[0]
-    q_words = {
-        w[:5]
-        for w in re.findall(r"[0-9a-zа-яё]{3,}", (question or "").casefold().replace("ё", "е"))
-    }
-    best = mrt_list[0]
-    best_score = -1
-    for item in mrt_list:
-        mrt_name = str(item["mrt"])
-        stem = str(item["id"]).casefold().replace("ё", "е")
-        sec = _description_from_instruction(instruction, mrt_name) if instruction else ""
-        blob = f"{stem} {sec}".casefold().replace("ё", "е")
-        score = 0
-        if stem in (question or "").casefold().replace("ё", "е"):
-            score += 10
-        blob_words = {w[:5] for w in re.findall(r"[0-9a-zа-яё]{3,}", blob)}
-        score += len(q_words & blob_words)
-        if score > best_score:
-            best_score = score
-            best = item
-    return best
-
-
 def pick_dashboard(question: str, *, dir_path: Path | None = None) -> dict[str, object]:
-    """Инструкция + список .mrt → LLM (или эвристика) → выбранный mrt."""
-    mrt_list = list_mrt_files(dir_path)
+    """Инструкция + список .mrt → LLM → выбранный mrt. Дальше filters/open с этим файлом."""
+    base = dir_path or dashboards_dir()
+    mrt_list = list_mrt_files(base)
     if not mrt_list:
-        raise RuntimeError("Нет *.mrt в local/ и dashboards/")
+        raise RuntimeError(f"Нет *.mrt в {base}")
 
-    instruction = load_instruction(dir_path)
+    instruction = load_instruction(base)
+    if not instruction:
+        raise RuntimeError(
+            f"Нет инструкции: положи {base / 'instruction.md'} (или любой *.md)"
+        )
+
     q = (question or "").strip()
     if not q:
         raise RuntimeError("question пустой")
 
     names = [str(x["mrt"]) for x in mrt_list]
-    if len(mrt_list) == 1:
+    user = (
+        f"Инструкция:\n{instruction}\n\n"
+        f"Доступные .mrt:\n{json.dumps(names, ensure_ascii=False)}\n\n"
+        f"Вопрос пользователя:\n{q}"
+    )
+    content = _chat(
+        [
+            {"role": "system", "content": PICK_SYSTEM},
+            {"role": "user", "content": user},
+        ]
+    )
+    picked = _parse_json_object(content)
+    want = _normalize_mrt_name(str(picked.get("mrt") or ""))
+    try:
+        match = _find_mrt(want, dir_path=base)
+    except RuntimeError:
         match = mrt_list[0]
-        description = _description_from_instruction(instruction, str(match["mrt"]))
-        return {
-            "id": match["id"],
-            "mrt": match["mrt"],
-            "mrt_path": match["mrt_path"],
-            "title": str(match["id"]),
-            "description": description,
-            "reason": "доступен один файл .mrt",
-            "instruction_used": bool(instruction),
-            "available_mrt": names,
-            "picked": False,
-        }
-
-    picked: dict[str, object] = {}
-    if instruction and llm_configured():
-        user = (
-            f"Инструкция:\n{instruction}\n\n"
-            f"Доступные .mrt:\n{json.dumps(names, ensure_ascii=False)}\n\n"
-            f"Вопрос пользователя:\n{q}"
-        )
-        try:
-            content = _chat(
-                [
-                    {"role": "system", "content": PICK_SYSTEM},
-                    {"role": "user", "content": user},
-                ]
-            )
-            picked = _parse_json_object(content)
-            want = _normalize_mrt_name(str(picked.get("mrt") or ""))
-            match = _find_mrt(want, dir_path=dir_path)
-        except Exception as exc:
-            match = _heuristic_pick(q, mrt_list, instruction)
-            picked["reason"] = (
-                f"Выбран эвристикой ({exc}); файл {match['mrt']}."
-            )
-    else:
-        match = _heuristic_pick(q, mrt_list, instruction)
-        picked["reason"] = f"Выбран по ключевым словам: {match['mrt']}."
+        picked["reason"] = (
+            f"LLM вернул неизвестный mrt={want!r}; взят {match['mrt']}. "
+            + str(picked.get("reason") or "")
+        ).strip()
 
     title = str(picked.get("title") or match["id"]).strip()
+    # description = вся секция instruction.md про этот .mrt (не LLM)
     description = _description_from_instruction(instruction, str(match["mrt"]))
     return {
         "id": match["id"],
@@ -431,7 +325,7 @@ def pick_dashboard(question: str, *, dir_path: Path | None = None) -> dict[str, 
         "title": title,
         "description": description,
         "reason": str(picked.get("reason") or "").strip(),
-        "instruction_used": bool(instruction),
+        "instruction_used": True,
         "available_mrt": names,
         "llm_raw": picked,
         "picked": True,
@@ -444,12 +338,13 @@ def _description_from_instruction(instruction: str, mrt_name: str) -> str:
     text = (instruction or "").strip()
     if not text:
         return ""
+    # ## demo.mrt / ## demo
     pat = re.compile(
         rf"(?im)^##\s+({re.escape(mrt_name)}|{re.escape(stem)})\s*$"
     )
     m = pat.search(text)
     if not m:
-        return ""
+        return text
     start = m.start()
     nxt = re.search(r"(?m)^##\s+", text[m.end() :])
     end = m.end() + nxt.start() if nxt else len(text)
@@ -497,9 +392,10 @@ def extract_filter_values(
 ) -> dict[str, object]:
     """LLM работает с filters как есть → {name: value}."""
     q = (question or "").strip()
-    if not q or not filters or not llm_configured():
+    if not q or not filters:
         return {}
 
+    # отдаём LLM тот же shape, что в /filters (name/alias/choices/value)
     compact: list[dict[str, object]] = []
     for f in filters:
         if not isinstance(f, dict) or not f.get("name"):
