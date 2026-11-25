@@ -72,19 +72,6 @@
     );
   }
 
-  function downloadBlob(blob, name) {
-    var url = URL.createObjectURL(blob);
-    var a = document.createElement("a");
-    a.href = url;
-    a.download = name;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(function () {
-      URL.revokeObjectURL(url);
-    }, 2000);
-  }
-
   function blobToBase64(blob) {
     return new Promise(function (resolve, reject) {
       var reader = new FileReader();
@@ -689,8 +676,8 @@
   }
 
   /**
-   * Save на Table/Pivot → PDF A2 (как hover Save), с учётом drill-down.
-   * Скачивает PDF + кладёт в exports/.
+   * Table/Pivot → PDF A2, с учётом drill-down.
+   * Байты уходят только в exports/ сервиса. Браузер файл не сохраняет.
    * @returns {Promise<Array<{name:string,path?:string}>>}
    */
   async function exportTablesToPdf(report, root) {
@@ -731,24 +718,6 @@
       setStatus("PDF A2 " + (el.name || base) + "…");
       try {
         var data = await exportElementAsync(el, settings);
-        try {
-          Stimulsoft.System.StiObject.saveAs(
-            data,
-            pdfName,
-            "application/pdf"
-          );
-        } catch (e) {
-          console.warn("[dash-shot] saveAs pdf", e);
-          try {
-            var b64dl = stiBytesToBase64(data);
-            var bin = atob(b64dl);
-            var arr = new Uint8Array(bin.length);
-            for (var j = 0; j < bin.length; j++) arr[j] = bin.charCodeAt(j);
-            downloadBlob(new Blob([arr], { type: "application/pdf" }), pdfName);
-          } catch (e2) {
-            console.warn("[dash-shot] blob pdf", e2);
-          }
-        }
         try {
           var body = await postExportFile(pdfName, stiBytesToBase64(data), "pdf");
           files.push({
@@ -1411,7 +1380,6 @@
         }, "image/png");
       });
       var name = "dashboard_" + stamp() + ".png";
-      downloadBlob(blob, name);
       try {
         var b64 = await blobToBase64(blob);
         var body = await postExportFile(name, b64, "png");
@@ -1423,7 +1391,7 @@
         result.files.push(result.png);
         setStatus("saved " + result.png.name);
       } catch (err) {
-        setStatus("download ok");
+        setStatus("снимок не сохранился на сервисе");
         console.warn(err);
         if (!result.png) result.error = String((err && err.message) || err);
       }

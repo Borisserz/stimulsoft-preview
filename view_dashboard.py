@@ -1306,7 +1306,7 @@ def openapi_spec() -> dict:
             "/shot": {
                 "get": {
                     "tags": ["export"],
-                    "summary": "Сигнал открытому /open: скрин + download (без reload, без токена)",
+                    "summary": "Сигнал открытому /open: скрин в exports/, без скачивания в браузер",
                     "description": (
                         "Держи /open в браузере. GET /shot — общий сигнал любой вкладке, "
                         "токен не нужен. Дашборд не перезагружается."
@@ -1700,7 +1700,7 @@ def api_shot_done():
 
 @app.get("/shot")
 def api_shot():
-    """Сигнал открытой вкладке /open: скрин + download, без reload.
+    """Сигнал открытой вкладке /open: скрин в exports/, без скачивания в браузер.
 
     Нужна открытая вкладка /open|/viewer (html2canvas локально, без CDN).
     """
