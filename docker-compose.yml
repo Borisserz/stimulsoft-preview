@@ -1,0 +1,26 @@
+services:
+  viewer:
+    build: .
+    image: stimulsoft-preview:latest
+    ports:
+      - "8040:8040"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      VIEWER_HOST: 0.0.0.0
+      VIEWER_PORT: "8040"
+      VIEWER_OPEN: "0"
+      # База остаётся на Mac. 127.0.0.1 внутри контейнера — это сам контейнер.
+      POSTGRES_HOST: host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # .mrt и .env в образ не входят. Файл лежит только на диске.
+      - ./local:/app/local:ro
+      - ./dashboards:/app/dashboards:ro
+      - stimulsoft-exports:/app/exports
+    restart: "no"
+
+volumes:
+  stimulsoft-exports:
